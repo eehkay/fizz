@@ -217,6 +217,8 @@ The essentials:
 |              | `s`                         | Save to `~/Downloads`        |
 |              | `c`                         | Copy the message's text (`y` works too) |
 |              | `r`                         | React with a tapback (needs the Private API helper) |
+|              | `e`                         | Edit a message you sent (helper; within about 15 minutes) |
+|              | `u`                         | Unsend a message you sent (helper; within about 2 minutes) |
 | Anywhere     | `?` / `F1`                  | Help                         |
 |              | `i` / `F2`                  | Stats (see below)            |
 |              | `Ctrl+C`                    | Quit                         |
@@ -314,11 +316,14 @@ What Fizz uses it for today:
 - Tapbacks: select a message with `Tab`, press `r`, and pick one of the
   six (arrows and Enter, or `1` to `6`). Picking the one you already gave
   removes it.
+- Edit and unsend: select one of your own messages with `Tab`, then `e` to
+  edit its text (Enter saves) or `u` to unsend it (it asks first). Apple
+  sets the time limits: about 15 minutes to edit, about 2 to unsend.
 - Starting a new conversation may need it, depending on the macOS version,
   since creating chats is one of the things the helper is for. If a new
   conversation fails to start, this is the likely reason.
 
-Edits, typing indicators, searching message text and deleting chats from
+Typing indicators, replying to a specific message and deleting chats from
 Fizz are not built yet; they need the helper first.
 
 ### Setting it up
@@ -379,9 +384,9 @@ patched (OpenCore) Macs, which differ.
 ## Good to know
 
 - Sending uses the server's AppleScript method, so it works without the
-  BlueBubbles Private API. Tapbacks and marking chats read need that API
-  and work once it is connected; edits, typing indicators and deleting
-  chats need it too and are not implemented.
+  BlueBubbles Private API. Tapbacks, edits, unsending and marking chats
+  read need that API and work once it is connected; typing indicators and
+  deleting chats need it too and are not implemented.
 - Unread dots: Fizz remembers which conversations you have opened (in
   `~/.local/state/fizz/seen.json`), so they stay read across restarts.
   Marking them read on the Mac and your other devices needs the Private

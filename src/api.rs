@@ -168,6 +168,31 @@ impl Api {
         .await
     }
 
+    /// Take back a message you sent. Apple allows this for about two
+    /// minutes after sending; needs the Private API helper.
+    pub async fn unsend(&self, message: &str, part: usize) -> Result<Message> {
+        self.post(
+            &format!("/message/{}/unsend", encode(message)),
+            json!({ "partIndex": part }),
+        )
+        .await
+    }
+
+    /// Change the text of a message you sent. Apple allows this for about
+    /// fifteen minutes after sending; needs the Private API helper.
+    pub async fn edit(&self, message: &str, text: &str, part: usize) -> Result<Message> {
+        self.post(
+            &format!("/message/{}/edit", encode(message)),
+            json!({
+                "editedMessage": text,
+                // What people on devices too old to show edits will see.
+                "backwardsCompatibilityMessage": format!("Edited to: {text}"),
+                "partIndex": part,
+            }),
+        )
+        .await
+    }
+
     /// Mark a chat read on the Mac, which clears it on the user's other
     /// devices. The server only allows this with the Private API helper.
     pub async fn mark_read(&self, chat: &str) -> Result<()> {

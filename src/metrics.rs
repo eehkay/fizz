@@ -38,6 +38,8 @@ pub fn kind(path: &str) -> &'static str {
         p if p.starts_with("/message/text") => "send",
         p if p.starts_with("/message/attachment") => "send file",
         p if p.starts_with("/message/react") => "tapback",
+        p if p.ends_with("/unsend") => "unsend",
+        p if p.ends_with("/edit") => "edit",
         p if p.starts_with("/chat/query") => "chat list",
         p if p.starts_with("/chat/new") => "new chat",
         p if p.ends_with("/read") => "mark read",

@@ -45,6 +45,14 @@ pub enum AppEvent {
     Info(ServerInfo),
     /// The result of an update check: the newer commit, if there is one.
     Update(Option<String>),
+    /// An unsend or edit has been accepted (or refused).
+    Changed {
+        chat: String,
+        what: &'static str,
+        /// The new text, for an edit.
+        text: Option<String>,
+        result: Result<Message, String>,
+    },
     /// A tapback we sent has been accepted (or refused).
     Reacted {
         chat: String,
@@ -234,6 +242,11 @@ pub struct App {
     pub cache_sizes: Option<(u64, u64)>,
     /// A newer version's commit, when one has been pushed.
     pub update: Option<String>,
+    /// The message waiting for "really unsend?" to be answered.
+    pub unsending: Option<String>,
+    /// The message being edited in the message box: its id, which part of
+    /// it, and the draft that was in the box before.
+    pub editing: Option<(String, usize, String)>,
     /// The tapback picker, and which of the six is highlighted.
     pub reacting: Option<usize>,
     /// The attachment highlighted while browsing.
@@ -324,6 +337,8 @@ impl App {
             cpu_percent: None,
             cache_sizes: None,
             update: None,
+            unsending: None,
+            editing: None,
             reacting: None,
             selected: None,
             reveal: false,
@@ -883,6 +898,139 @@ impl App {
         TAPBACKS.iter().position(|(_, g)| g == glyph)
     }
 
+    /// The selected message, if it is one of yours that has really gone out.
+    fn selected_own(&mut self, verb: &str) -> Option<(String, usize, i64, String)> {
+        let found = self.selected_message().map(|(m, part)| {
+            (
+                m.is_from_me && !m.pending && m.failed.is_none() && m.date_retracted.is_none(),
+                m.guid.clone(),
+                part,
+                m.date_created,
+                m.body(),
+            )
+        });
+        match found {
+            Some((true, guid, part, sent, body)) => Some((guid, part, sent, body)),
+            Some(_) => {
+                self.set_status(format!("You can only {verb} messages you have sent"));
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// How long ago a message was sent, in minutes.
+    fn minutes_since(sent_ms: i64) -> i64 {
+        (chrono::Utc::now().timestamp_millis() - sent_ms) / 60_000
+    }
+
+    fn start_unsending(&mut self) {
+        if let Some((guid, _, sent, _)) = self.selected_own("unsend") {
+            self.unsending = Some(guid);
+            if Self::minutes_since(sent) >= 2 {
+                self.set_status(
+                    "Apple only allows unsending for about 2 minutes, so this may be refused".into(),
+                );
+            }
+        }
+    }
+
+    fn unsend(&mut self) {
+        let Some(target) = self.unsending.take() else { return };
+        let Some(chat) = self.open.clone() else { return };
+        let part = self.selected_message().map_or(0, |(_, part)| part);
+        match self.api.clone() {
+            Some(api) => {
+                self.set_status("Unsending…".into());
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = api.unsend(&target, part).await.map_err(|e| e.to_string());
+                    let _ = tx.send(AppEvent::Changed {
+                        chat,
+                        what: "unsend",
+                        text: None,
+                        result,
+                    });
+                });
+            }
+            None => {
+                // The demo applies it straight away.
+                if let Some(m) = self
+                    .convos
+                    .get_mut(&chat)
+                    .and_then(|c| c.messages.iter_mut().find(|m| m.guid == target))
+                {
+                    m.date_retracted = Some(chrono::Utc::now().timestamp_millis());
+                }
+            }
+        }
+    }
+
+    fn start_editing(&mut self) {
+        let Some((guid, part, sent, body)) = self.selected_own("edit") else {
+            return;
+        };
+        if body.is_empty() {
+            self.set_status("Only a message's text can be edited".into());
+            return;
+        }
+        let draft = self.input.take();
+        self.input.set(body);
+        self.editing = Some((guid, part, draft));
+        self.focus = Focus::Compose;
+        if Self::minutes_since(sent) >= 15 {
+            self.set_status(
+                "Apple only allows editing for about 15 minutes, so this may be refused".into(),
+            );
+        }
+    }
+
+    fn cancel_editing(&mut self) {
+        if let Some((_, _, draft)) = self.editing.take() {
+            self.input.set(draft);
+            self.focus = Focus::Browse;
+        }
+    }
+
+    fn send_edit(&mut self) {
+        let text = self.input.text().trim().to_string();
+        if text.is_empty() {
+            self.set_status("An edit needs some text (u unsends a message instead)".into());
+            return;
+        }
+        let Some((target, part, draft)) = self.editing.take() else {
+            return;
+        };
+        self.input.set(draft);
+        self.focus = Focus::Browse;
+        let Some(chat) = self.open.clone() else { return };
+        match self.api.clone() {
+            Some(api) => {
+                self.set_status("Saving the edit…".into());
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = api.edit(&target, &text, part).await.map_err(|e| e.to_string());
+                    let _ = tx.send(AppEvent::Changed {
+                        chat,
+                        what: "edit",
+                        text: Some(text),
+                        result,
+                    });
+                });
+            }
+            None => {
+                if let Some(m) = self
+                    .convos
+                    .get_mut(&chat)
+                    .and_then(|c| c.messages.iter_mut().find(|m| m.guid == target))
+                {
+                    m.text = Some(text);
+                    m.date_edited = Some(chrono::Utc::now().timestamp_millis());
+                }
+            }
+        }
+    }
+
     fn start_reacting(&mut self) {
         match self.selected_message() {
             Some((message, _)) if message.pending || message.failed.is_some() => {
@@ -1230,6 +1378,9 @@ impl App {
             File(PathBuf),
             Text(String),
         }
+        if self.editing.is_some() {
+            return self.send_edit();
+        }
         let Some(chat) = self.open.clone() else { return };
         let text = self.input.text().trim().to_string();
         if let Some(address) = chat.strip_prefix("new:") {
@@ -1386,6 +1537,40 @@ impl App {
                     });
                 }
             }
+            AppEvent::Changed {
+                chat,
+                what,
+                text,
+                result,
+            } => match result {
+                Ok(mut updated) => {
+                    // Make sure the change shows even if the reply lags it.
+                    let now = chrono::Utc::now().timestamp_millis();
+                    match text {
+                        Some(text) => {
+                            updated.text = Some(text);
+                            updated.date_edited.get_or_insert(now);
+                        }
+                        None => {
+                            updated.date_retracted.get_or_insert(now);
+                        }
+                    }
+                    let convo = self.convos.entry(chat).or_default();
+                    // Replies to these requests come without attachments.
+                    if let Some(existing) = convo.messages.iter().find(|m| m.guid == updated.guid)
+                        && updated.attachments.is_empty()
+                    {
+                        updated.attachments = existing.attachments.clone();
+                    }
+                    convo.absorb(updated);
+                    convo.settle();
+                    self.status = None;
+                }
+                Err(e) if e.contains("Helper is not connected") => self.set_status(format!(
+                    "To {what} a message the server needs its Private API helper connected"
+                )),
+                Err(e) => self.set_status(format!("Couldn't {what} it: {e}")),
+            },
             AppEvent::Reacted { chat, result } => match result {
                 Ok(event) => {
                     let convo = self.convos.entry(chat).or_default();
@@ -1886,6 +2071,16 @@ impl App {
             }
             return;
         }
+        if self.unsending.is_some() {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('u') => self.unsend(),
+                _ => {
+                    self.unsending = None;
+                    self.status = None;
+                }
+            }
+            return;
+        }
         if let Some(chosen) = self.reacting {
             let last = TAPBACKS.len() - 1;
             match key.code {
@@ -1981,6 +2176,7 @@ impl App {
                 let before = self.input.text().len();
 
                 match key.code {
+                    KeyCode::Esc if self.editing.is_some() => self.cancel_editing(),
                     KeyCode::Esc => self.focus = Focus::List,
                     KeyCode::Tab => self.browse(),
                     KeyCode::Enter if alt_or_shift => self.input.insert('\n'),
@@ -2024,6 +2220,8 @@ impl App {
                 KeyCode::Char('s') => self.save_selected(),
                 KeyCode::Char('y') | KeyCode::Char('c') => self.copy_selected(),
                 KeyCode::Char('r') => self.start_reacting(),
+                KeyCode::Char('u') => self.start_unsending(),
+                KeyCode::Char('e') => self.start_editing(),
                 KeyCode::Esc | KeyCode::Tab | KeyCode::Char('q') => self.focus = Focus::Compose,
                 _ => {}
             },

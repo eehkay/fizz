@@ -70,6 +70,7 @@ pub struct Message {
     pub date_read: Option<i64>,
     pub date_delivered: Option<i64>,
     pub date_retracted: Option<i64>,
+    pub date_edited: Option<i64>,
     pub is_delivered: bool,
     pub error: i64,
     pub attachments: Vec<Attachment>,

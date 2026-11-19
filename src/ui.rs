@@ -593,6 +593,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("s", "Save the picture or file to Downloads"),
             ("c", "Copy the message's text (y works too)"),
             ("r", "React: pick a tapback (needs the server's Private API helper)"),
+            ("e", "Edit a message you sent (within about 15 minutes)"),
+            ("u", "Unsend a message you sent (within about 2 minutes)"),
             ("Esc", "Back to typing"),
         ],
     ),
@@ -984,9 +986,15 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         app.short_name_for(&chat.participants.first().map_or("", |p| &p.address))
     };
-    let block = Block::bordered()
+    let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(if focused { theme.accent } else { theme.muted }));
+    if app.editing.is_some() {
+        block = block.title(Span::styled(
+            " Editing your message · Enter saves · Esc cancels ",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    }
     let mut inner = block.inner(input_area).inner(ratatui::layout::Margin::new(1, 0));
     frame.render_widget(block, input_area);
     for (i, chip) in chips.into_iter().enumerate() {
@@ -1016,6 +1024,30 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
             .collect();
         frame.render_widget(Paragraph::new(shown), inner);
     }
+    // "Really unsend?" floats just above the message box.
+    if app.unsending.is_some() {
+        let text = " Unsend for everyone?  Enter unsends · any other key cancels ";
+        let w = (width(text) as u16 + 2).min(area.width);
+        let popup = Rect::new(
+            input_area.x + 1,
+            input_area.y.saturating_sub(3),
+            w,
+            3.min(input_area.y.saturating_sub(area.y)),
+        );
+        if popup.height == 3 {
+            frame.render_widget(Clear, popup);
+            let block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(theme.red));
+            let row = block.inner(popup);
+            frame.render_widget(block, popup);
+            frame.render_widget(
+                Line::styled(truncate(text, usize::from(row.width)), Style::new().fg(theme.bright)),
+                row,
+            );
+        }
+    }
+
     // The tapback picker floats in the same place.
     if let Some(chosen) = app.reacting {
         const CELL: u16 = 6;
@@ -1502,6 +1534,14 @@ fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
             }
         }
 
+        if message.date_edited.is_some() && message.date_retracted.is_none() {
+            let left = if mine { w.saturating_sub(7) } else { 1 };
+            items.push(Item::Line(Line::from(vec![
+                Span::raw(pad(left)),
+                Span::styled("Edited", muted.add_modifier(Modifier::ITALIC)),
+            ])));
+        }
+
         if let Some(reactions) = convo.reactions.get(&message.guid) {
             let mut tally: Vec<(String, usize)> = Vec::new();
             for (_, glyph) in reactions {
@@ -1523,7 +1563,7 @@ fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
         }
 
         // Delivery state, under the newest message only and only for ours.
-        if mine && last_guid == Some(message.guid.as_str()) {
+        if mine && last_guid == Some(message.guid.as_str()) && message.date_retracted.is_none() {
             let (text, color) = if let Some(reason) = &message.failed {
                 (format!("Not sent: {reason}"), theme.red)
             } else if message.error != 0 {
@@ -1581,12 +1621,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("esc", "cancel")]
     } else if app.focus == Focus::List {
         &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("/", "search"), ("?", "help"), ("q", "quit")]
+    } else if app.unsending.is_some() {
+        &[("⏎", "unsend"), ("esc", "cancel")]
+    } else if app.editing.is_some() {
+        &[("⏎", "save edit"), ("esc", "cancel")]
     } else if app.reacting.is_some() {
         &[("←→", "choose"), ("1-6", "pick"), ("⏎", "send"), ("esc", "cancel")]
     } else if app.picking.is_some() {
         &[("type", "name or number"), ("↑↓", "choose"), ("⏎", "start"), ("esc", "cancel")]
     } else if app.focus == Focus::Browse && app.selected_text().is_some() {
-        &[("↑↓", "select"), ("r", "react"), ("c", "copy"), ("⏎", "open link"), ("?", "help"), ("esc", "back")]
+        &[("↑↓", "select"), ("r", "react"), ("c", "copy"), ("e", "edit"), ("u", "unsend"), ("⏎", "open link"), ("?", "help")]
     } else if app.focus == Focus::Browse {
         &[("↑↓", "select"), ("r", "react"), ("⏎", "open"), ("s", "save"), ("?", "help"), ("esc", "back")]
     } else if !app.emoji_matches().is_empty() {
