@@ -105,7 +105,8 @@ a picture or file to open it, click a message to select it.
 Press `n` in the chat list and type a name, a phone number or an email
 address. Contacts come from the Mac's address book. If you already have a
 conversation with that person it opens; otherwise a new one is created when
-you send its first message. Numbers typed without a country code get the default one from the settings
+you send its first message. On some macOS versions the server can only
+create a chat with the Private API helper connected (see below). Numbers typed without a country code get the default one from the settings
 file (`+1` unless changed); a leading `+` is always respected. Only one-to-one conversations can be
 started.
 
@@ -157,6 +158,80 @@ On Omarchy, bind a key to open it (or focus it if it is already open) in
 ```lua
 o.bind("SUPER + SHIFT + U", "Messages (Fizz)", { tui = "fizz", focus = true })
 ```
+
+## Private API helper (optional)
+
+BlueBubbles Server can load a helper into the Mac's Messages app, which it
+calls the Private API. Fizz works without it. With it, the server can do
+things plain AppleScript cannot: tapbacks, replies, edits and unsends,
+typing indicators, marking chats read, and creating and deleting chats.
+
+What Fizz uses it for today:
+
+- `fizz check` reports whether the helper is connected.
+- Setting `send_method = "private-api"` in the settings file sends through
+  it.
+- Starting a new conversation may need it, depending on the macOS version,
+  since creating chats is one of the things the helper is for. If a new
+  conversation fails to start, this is the likely reason.
+
+Sending tapbacks, edits, typing indicators and deleting chats from Fizz are
+not built yet; they need the helper first.
+
+### Setting it up
+
+This is done on the Mac that runs BlueBubbles Server, and it means turning
+off System Integrity Protection (SIP), one of macOS's security layers. The
+BlueBubbles documentation compares this to jailbreaking a phone and says to
+do it at your own risk. On Apple Silicon Macs it also stops iPhone and iPad
+apps from running on that Mac. It suits a Mac that mostly sits there being
+a message server; think twice on one you use day to day.
+
+The steps below are a summary of the
+[official guide](https://docs.bluebubbles.app/private-api/installation) for
+macOS 11 and newer. Follow that page for older macOS, virtual machines and
+patched (OpenCore) Macs, which differ.
+
+1. In Terminal on the Mac, allow the helper to be loaded:
+
+   ```sh
+   sudo defaults write /Library/Preferences/com.apple.security.libraryvalidation.plist DisableLibraryValidation -bool true
+   ```
+
+2. Start the Mac in Recovery mode.
+
+   - **Apple Silicon:** shut down, then hold the power button until
+     "Loading startup options" appears. Choose Options, then Continue. On
+     recent macOS, hold Left Shift while clicking Continue and keep holding
+     it while you enter your password; otherwise SIP may not turn off.
+   - **Intel:** save your work, then run these (the Mac restarts at once):
+
+     ```sh
+     sudo nvram internet-recovery-mode=RecoveryModeDisk
+     sudo reboot recovery
+     ```
+
+3. In Recovery, open Utilities > Terminal and run:
+
+   ```sh
+   csrutil disable
+   ```
+
+   Then choose Restart from the Apple menu.
+
+4. In BlueBubbles Server's settings, turn on **Private API**, and press the
+   refresh button in the **Private API Status** box to confirm it loaded.
+   If it does not, quit and reopen the server with the switch on.
+
+5. From the machine running Fizz, confirm:
+
+   ```sh
+   fizz check
+   ```
+
+   It should print `Private API on`. "Enabled, helper not connected" means
+   the switch is on but the helper did not load, which usually means SIP
+   is still on (`csrutil status` on the Mac tells you).
 
 ## Good to know
 
