@@ -128,6 +128,19 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         (l, c)
     };
 
+    if app.splash() {
+        app.list_rect = Rect::default();
+        app.convo_rect = Rect::default();
+        let note = if app.chats_loading || app.chats.is_empty() {
+            "Loading conversations…"
+        } else {
+            "iMessage in your terminal"
+        };
+        draw_logo(frame, &app.theme, main, note, Some(app.frame));
+        draw_status(frame, app, status);
+        return;
+    }
+
     app.list_rect = Rect::default();
     app.convo_rect = convo_area;
     if list_area.width > 0 {
@@ -140,6 +153,74 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.help {
         draw_help(frame, app, main);
     }
+}
+
+/// The wordmark.
+const LOGO: [&str; 5] = [
+    r"  __ _         ",
+    r" / _(_)________",
+    r"| |_| |_  /_  /",
+    r"|  _| |/ / / / ",
+    r"|_| |_/___/___|",
+];
+
+/// Rows of bubbles rising, for the given moment in the animation. Each
+/// bubble keeps its column, climbs at its own pace, grows as it rises and
+/// takes a short rest out of sight before starting again.
+fn bubbles(theme: &Theme, tick: u64, w: usize, h: usize) -> Vec<Line<'static>> {
+    let mut grid = vec![vec![(' ', theme.muted); w]; h];
+    let scramble = |n: u64| n.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(23) ^ (n >> 7);
+    for k in 0..w as u64 {
+        let column = (scramble(k) % w as u64) as usize;
+        let pace = 2 + scramble(k + 101) % 3;
+        let cycle = (h + 2 + (scramble(k + 211) % 5) as usize) as u64;
+        let climbed = ((tick + scramble(k + 307) % 97) / pace + scramble(k + 401)) % cycle;
+        let climbed = climbed as usize;
+        if climbed >= h {
+            continue;
+        }
+        // A slight sway as it goes up.
+        let sway = usize::from(climbed % 4 >= 2);
+        let x = (column + sway).min(w - 1);
+        let (glyph, color) = match climbed * 3 / h.max(1) {
+            0 => ('.', theme.muted),
+            1 => ('o', theme.muted),
+            _ if k % 2 == 0 => ('O', theme.accent),
+            _ => ('°', theme.accent),
+        };
+        grid[h - 1 - climbed][x] = (glyph, color);
+    }
+    grid.into_iter()
+        .map(|row| {
+            Line::from(
+                row.into_iter()
+                    .map(|(glyph, color)| Span::styled(glyph.to_string(), Style::new().fg(color)))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
+}
+
+/// The Fizz wordmark with a line of text under it, centred in `area`.
+/// With `tick` set, bubbles rise above it.
+fn draw_logo(frame: &mut Frame, theme: &Theme, area: Rect, note: &str, tick: Option<u64>) {
+    let logo_w = LOGO[0].chars().count();
+    let field_w = logo_w + 8;
+    let mut lines: Vec<Line> = Vec::new();
+    let room = usize::from(area.height);
+    if let Some(tick) = tick.filter(|_| room >= 16 && usize::from(area.width) >= field_w) {
+        lines.extend(bubbles(theme, tick, field_w, 7));
+    }
+    if room >= 8 && usize::from(area.width) >= logo_w {
+        let style = Style::new().fg(theme.accent).add_modifier(Modifier::BOLD);
+        lines.extend(LOGO.iter().map(|row| Line::styled(row.to_string(), style)));
+        lines.push(Line::default());
+    }
+    lines.push(Line::styled(note.to_string(), Style::new().fg(theme.muted)));
+
+    let h = (lines.len() as u16).min(area.height);
+    let spot = Rect::new(area.x, area.y + (area.height - h) / 2, area.width, h);
+    frame.render_widget(Paragraph::new(lines).centered(), spot);
 }
 
 /// Everything the app can do, grouped by where you are when you do it.
@@ -202,7 +283,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("Pictures", "Shown inline; videos get a still frame (needs ffmpeg)"),
             ("Colours", "Follow the current Omarchy theme, live"),
-            ("Notifications", "For messages in chats you are not looking at"),
+            ("Notifications", "For messages in chats you are not looking at; a sound is optional"),
             ("Settings", "Run: fizz config  (opens ~/.config/fizz/config.toml)"),
         ],
     ),
@@ -523,11 +604,7 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
         let block = pane(&theme, "Fizz".into(), false);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let note = Paragraph::new("Select a conversation")
-            .style(Style::new().fg(theme.muted))
-            .centered();
-        let mid = Rect::new(inner.x, inner.y + inner.height / 2, inner.width, 1);
-        frame.render_widget(note, mid.intersection(inner));
+        draw_logo(frame, &theme, inner, "Select a conversation", None);
         return;
     };
 
@@ -686,11 +763,13 @@ fn draw_timeline(frame: &mut Frame, app: &mut App, chat: &Chat, view: Rect) {
     };
     let middle = Rect::new(view.x, view.y + view.height / 2, view.width, 1);
     if !convo.loaded {
-        let note = match &convo.error {
-            Some(e) => centered(format!("Couldn't load messages: {e}"), theme.red),
-            None => centered("Loading…".into(), theme.muted),
-        };
-        frame.render_widget(note, middle);
+        match &convo.error {
+            Some(e) => frame.render_widget(
+                centered(format!("Couldn't load messages: {e}"), theme.red),
+                middle,
+            ),
+            None => draw_logo(frame, &theme, view, "Loading messages…", Some(app.frame)),
+        }
         return;
     }
     if convo.messages.is_empty() {

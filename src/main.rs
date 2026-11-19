@@ -41,6 +41,7 @@ Usage:
   fizz setup      Enter or change the server address and password
   fizz check      Test the connection and print what was found
   fizz config     Open the settings file in your editor
+  fizz sound      Play the notification sound
   fizz --demo     Try the interface with made-up conversations
 
 The server address and password live in ~/.config/fizz/env (BB_URL and
@@ -78,6 +79,21 @@ async fn main() -> Result<()> {
     }
     if has("config") {
         return config::edit_settings();
+    }
+    if has("sound") {
+        // Play the notification sound, to hear it or check it works.
+        let chosen = config::settings().notifications.sound.clone();
+        let (what, choice) = match chosen.trim() {
+            "" | "off" => ("Sound is off in the settings; this is the built-in pop.", "pop"),
+            other => ("Playing the sound from your settings.", other),
+        };
+        println!("{what}");
+        if !files::play_sound(choice) {
+            println!("Couldn't play it: no audio player found (pw-play, paplay, afplay, ffplay or aplay), or the file is missing.");
+        }
+        // Give the player a moment before this process exits.
+        std::thread::sleep(Duration::from_millis(600));
+        return Ok(());
     }
     if has("--demo") {
         return run(None).await;
@@ -214,7 +230,6 @@ async fn event_loop(
     theme::watch(tx);
 
     let mut keys = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
     while !app.quit {
         terminal.draw(|frame| ui::draw(frame, &mut app))?;
         app.after_draw();
@@ -227,13 +242,14 @@ async fn event_loop(
                     app.on_event(event);
                 }
             }
-            _ = tick.tick() => app.on_tick(),
+            _ = tokio::time::sleep(app.tick_rate()) => app.on_tick(),
         }
     }
     Ok(())
 }
 
-/// Render the demo once to plain text: `fizz --snapshot 120x36`.
+/// Render the demo once to plain text: `fizz --snapshot 120x36`. Add
+/// `--splash` to render the loading screen instead.
 fn snapshot(size: Option<&str>) -> Result<()> {
     let (w, h) = size
         .and_then(|s| s.split_once('x'))
@@ -242,6 +258,10 @@ fn snapshot(size: Option<&str>) -> Result<()> {
     let (tx, _rx) = unbounded_channel();
     let mut app = App::new(None, tx, Picker::halfblocks());
     app.load_demo();
+    app.splash_until = std::env::args()
+        .any(|a| a == "--splash")
+        .then(|| std::time::Instant::now() + Duration::from_secs(3600));
+    app.frame = 23;
     let mut terminal = Terminal::new(TestBackend::new(w, h))?;
     terminal.draw(|frame| ui::draw(frame, &mut app))?;
     let buffer = terminal.backend().buffer();

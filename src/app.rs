@@ -185,6 +185,11 @@ pub struct App {
     /// The "To:" text while choosing who to start a conversation with.
     pub picking: Option<String>,
     pub pick_index: usize,
+    /// Animation clock for the loading screen, advanced on each tick.
+    pub frame: u64,
+    /// Keep the loading screen up until this moment (used by the demo,
+    /// which otherwise has nothing to wait for).
+    pub splash_until: Option<Instant>,
     /// The help screen, and how far it is scrolled.
     pub help: bool,
     pub help_scroll: u16,
@@ -192,6 +197,7 @@ pub struct App {
     window_focused: bool,
     notify: bool,
     notified: HashSet<String>,
+    last_sound: Option<Instant>,
     started_ms: i64,
     can_make_stills: bool,
 
@@ -256,6 +262,8 @@ impl App {
             people: Vec::new(),
             picking: None,
             pick_index: 0,
+            frame: 0,
+            splash_until: None,
             help: false,
             help_scroll: 0,
             window_focused: true,
@@ -265,6 +273,7 @@ impl App {
                 |v| v != "0" && v != "off",
             ),
             notified: HashSet::new(),
+            last_sound: None,
             started_ms: chrono::Utc::now().timestamp_millis(),
             can_make_stills: false,
             cursor: None,
@@ -326,6 +335,7 @@ impl App {
         let first = self.chats[0].guid.clone();
         self.cursor = Some(first.clone());
         self.open_chat(&first);
+        self.splash_until = Some(Instant::now() + Duration::from_millis(1600));
     }
 
     pub fn start(&mut self) {
@@ -925,7 +935,9 @@ impl App {
     /// A desktop notification for a message that just arrived, unless you
     /// are looking at that conversation right now.
     fn maybe_notify(&mut self, message: &Message) {
-        if !self.notify
+        let sound = crate::config::settings().notifications.sound.as_str();
+        let wants_sound = !matches!(sound.trim(), "" | "off");
+        if (!self.notify && !wants_sound)
             || self.api.is_none()
             || message.is_from_me
             || message.item_type != 0
@@ -953,7 +965,17 @@ impl App {
         } else {
             "New message".to_string()
         };
-        files::notify(&title, &body);
+        if self.notify {
+            files::notify(&title, &body);
+        }
+        // One sound for a burst of messages, not one each.
+        let recently = self
+            .last_sound
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(1500));
+        if wants_sound && !recently {
+            files::play_sound(sound);
+            self.last_sound = Some(Instant::now());
+        }
     }
 
     fn scroll_by(&mut self, rows: isize) {
@@ -1454,7 +1476,36 @@ impl App {
         self.status.as_ref().map(|(text, _)| text.as_str())
     }
 
+    /// Whether the full-window loading screen should be showing: before the
+    /// first conversations arrive, or while the demo is showing it off.
+    pub fn splash(&self) -> bool {
+        let waiting = self.api.is_some()
+            && self.chats.is_empty()
+            && self.chats_error.is_none()
+            && !self.chats_exhausted;
+        waiting || self.splash_until.is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Whether the open conversation is still fetching its first messages.
+    pub fn opening(&self) -> bool {
+        self.open
+            .as_ref()
+            .and_then(|g| self.convos.get(g))
+            .is_some_and(|c| !c.loaded && c.error.is_none())
+    }
+
+    /// How often to redraw without input: quickly while something is
+    /// animating, otherwise only enough to expire status messages.
+    pub fn tick_rate(&self) -> Duration {
+        if self.splash() || self.opening() {
+            Duration::from_millis(110)
+        } else {
+            Duration::from_secs(1)
+        }
+    }
+
     pub fn on_tick(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
         if self
             .status
             .as_ref()

@@ -366,6 +366,88 @@ pub fn notify(title: &str, body: &str) {
     }
 }
 
+/// Fizz's own notification sound: a bubble pop, which is a quick upward
+/// sweep in pitch that dies away. Built here so nothing has to be shipped
+/// or found on the system. Returns a 16-bit mono WAV.
+fn pop_wav() -> Vec<u8> {
+    const RATE: u32 = 44_100;
+    let samples = (RATE as f32 * 0.17) as usize;
+    let mut pcm = Vec::with_capacity(samples * 2);
+    let mut phase = 0.0f32;
+    for i in 0..samples {
+        let t = i as f32 / RATE as f32;
+        let progress = i as f32 / samples as f32;
+        // 480 Hz rising to about 1250 Hz.
+        let pitch = 480.0 * (2.6f32).powf(progress);
+        phase += std::f32::consts::TAU * pitch / RATE as f32;
+        // Fast attack so it does not click, then a quick fade.
+        let envelope = (t / 0.006).min(1.0) * (-progress * 5.5).exp();
+        let value = phase.sin() * envelope * 0.42;
+        pcm.extend_from_slice(&((value * i16::MAX as f32) as i16).to_le_bytes());
+    }
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&RATE.to_le_bytes());
+    wav.extend_from_slice(&(RATE * 2).to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&pcm);
+    wav
+}
+
+/// Play the notification sound chosen in the settings ("pop" or a file).
+/// Best effort: returns whether a player could be started.
+pub fn play_sound(choice: &str) -> bool {
+    let path = match choice.trim() {
+        "" | "off" => return false,
+        "pop" => {
+            let path = cache_dir().join("pop.wav");
+            if !path.exists() {
+                let _ = std::fs::create_dir_all(cache_dir());
+                if std::fs::write(&path, pop_wav()).is_err() {
+                    return false;
+                }
+            }
+            path
+        }
+        file => crate::config::expand_home(file),
+    };
+    if !path.is_file() {
+        return false;
+    }
+    // Whichever player this system has; the first that starts wins.
+    let players: [(&str, &[&str]); 5] = [
+        ("pw-play", &[]),
+        ("paplay", &[]),
+        ("afplay", &[]),
+        ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+        ("aplay", &["-q"]),
+    ];
+    for (player, args) in players {
+        if let Ok(mut child) = Command::new(player)
+            .args(args)
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return true;
+        }
+    }
+    false
+}
+
 /// Put text on the clipboard: through the desktop's own tool when there is
 /// one, otherwise by asking the terminal to do it.
 pub fn copy_text(text: &str) -> Result<()> {
@@ -514,6 +596,19 @@ mod tests {
         assert_eq!(dropped_paths(&format!("{p} and more")), None);
         assert_eq!(dropped_paths("/no/such/file.png"), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pop_is_a_valid_short_wav() {
+        let wav = pop_wav();
+        assert_eq!(&wav[..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        let declared = u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize;
+        assert_eq!(declared, wav.len() - 44);
+        // Under a quarter of a second, and it ends quietly (no click).
+        assert!(declared < 44_100 * 2 / 4);
+        let last = i16::from_le_bytes(wav[wav.len() - 2..].try_into().unwrap());
+        assert!(last.abs() < 400);
     }
 
     #[test]

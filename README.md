@@ -138,7 +138,8 @@ fizz config     # opens the settings file in your $EDITOR
 `~/.config/fizz/config.toml` is created on first run with every option and
 its default written out, each with a comment. It covers:
 
-- **Notifications:** on or off, and whether they show the message text
+- **Notifications:** on or off, whether they show the message text, and an
+  optional sound
 - **Appearance:** theme (`auto`, `terminal`, or a `colors.toml` path), 12 or
   24 hour clock, chat list width, conversation width, mouse on or off
 - **Media:** inline pictures on or off, how large they are drawn, video
@@ -230,6 +231,11 @@ clipboard (Wayland, needs `wl-clipboard`).
 A desktop notification appears for each new message, unless the window is
 focused and you are looking at that conversation. Turn them off, or hide
 the message text, in the settings file.
+
+For a sound as well, set `sound = "pop"` there for a short bubble pop that
+Fizz generates itself, or give it the path of a sound file of your own.
+`fizz sound` plays whichever is chosen. It is off by default, since many
+desktops already chime for notifications.
 
 ## Colours
 

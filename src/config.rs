@@ -160,6 +160,8 @@ pub struct Notifications {
     pub enabled: bool,
     /// Show the message text; when off, only who it is from.
     pub preview: bool,
+    /// "off", "pop" (Fizz's own sound), or the path of a sound file.
+    pub sound: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -210,6 +212,7 @@ impl Default for Notifications {
         Notifications {
             enabled: true,
             preview: true,
+            sound: "off".into(),
         }
     }
 }
@@ -263,6 +266,9 @@ pub const SETTINGS_TEMPLATE: &str = r#"# Fizz settings.
 enabled = true
 # Show the message text. Set to false to show only who it is from.
 preview = true
+# A sound for the same messages: "off", "pop" (a short bubble pop), or the
+# path of a sound file of your own. Hear it with: fizz sound
+sound = "off"
 
 [appearance]
 # "auto"     follow the current Omarchy theme, or the terminal if there is none
