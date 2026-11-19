@@ -6,6 +6,7 @@ iMessage in your terminal, through a [BlueBubbles](https://bluebubbles.app) serv
 - Photos shown inline as real pixels, and a still frame for videos
 - Start new conversations, send text, files and pictures, insert emoji
 - Open or save any attachment, copy message text, open links
+- Search every conversation and contact by name or number
 - New messages arrive live, with desktop notifications
 - Follows the current [Omarchy](https://omarchy.org) theme and re-colours
   itself when you switch; uses your terminal's colours everywhere else
