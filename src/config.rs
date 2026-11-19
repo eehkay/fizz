@@ -207,6 +207,8 @@ pub struct Messages {
     pub poll_seconds: u64,
     /// Tell the server when a chat has been read (needs the Private API).
     pub mark_read: bool,
+    /// Let the other person see "typing…" while you write (Private API).
+    pub send_typing: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -279,6 +281,7 @@ impl Default for Messages {
             emoji_popup: true,
             poll_seconds: 12,
             mark_read: true,
+            send_typing: true,
         }
     }
 }
@@ -348,6 +351,9 @@ poll_seconds = 12
 # other devices. Only possible with the Private API helper connected;
 # without it Fizz just remembers what you have read on this computer.
 mark_read = true
+# Show the other person the "typing…" bubble while you write. Needs the
+# Private API helper. Seeing theirs is not affected by this.
+send_typing = true
 "#;
 
 pub fn settings_path() -> PathBuf {

@@ -176,7 +176,8 @@ its default written out, each with a comment. It covers:
 - **Media:** inline pictures on or off, how large they are drawn, video
   stills and their size limit, where files are saved
 - **Messages:** default country code for new chats, send method, the emoji
-  popup, how often to poll, whether to mark chats read on the server
+  popup, how often to poll, whether to mark chats read on the server and
+  whether to show others when you are typing
 
 Restart Fizz after changing it. A typo does not stop Fizz starting: it says
 so in the status line (and in `fizz check`) and uses the defaults.
@@ -202,7 +203,8 @@ The essentials:
 | ------------ | --------------------------- | ---------------------------- |
 | Chat list    | `↑` `↓` / `j` `k`           | Move                         |
 |              | `Enter`                     | Open and start typing        |
-|              | `n`                         | New conversation             |
+|              | `n`                         | New conversation (`Tab` adds more people for a group) |
+|              | `D`                         | Delete the conversation everywhere (capital D; asks first) |
 |              | `/`                         | Search every conversation and contact |
 |              | `q`                         | Quit                         |
 | Writing      | `Enter`                     | Send                         |
@@ -216,6 +218,7 @@ The essentials:
 |              | `Enter`                     | Open the picture, video, file, or the link in a message |
 |              | `s`                         | Save to `~/Downloads`        |
 |              | `c`                         | Copy the message's text (`y` works too) |
+|              | `R`                         | Reply to that message (capital R; helper) |
 |              | `r`                         | React with a tapback (needs the Private API helper) |
 |              | `e`                         | Edit a message you sent (helper; within about 15 minutes) |
 |              | `u`                         | Unsend a message you sent (helper; within about 2 minutes) |
@@ -242,8 +245,11 @@ address. Contacts come from the Mac's address book. If you already have a
 conversation with that person it opens; otherwise a new one is created when
 you send its first message. On some macOS versions the server can only
 create a chat with the Private API helper connected (see below). Numbers typed without a country code get the default one from the settings
-file (`+1` unless changed); a leading `+` is always respected. Only one-to-one conversations can be
-started.
+file (`+1` unless changed); a leading `+` is always respected.
+
+For a group, press `Tab` instead of Enter to add the highlighted person and
+keep choosing; Enter starts the conversation with everyone added. Creating
+a group needs the server's Private API helper.
 
 ## Pictures, video and files
 
@@ -319,12 +325,22 @@ What Fizz uses it for today:
 - Edit and unsend: select one of your own messages with `Tab`, then `e` to
   edit its text (Enter saves) or `u` to unsend it (it asks first). Apple
   sets the time limits: about 15 minutes to edit, about 2 to unsend.
+- Replies: select a message and press `R`, type, and Enter sends it as an
+  inline reply to that message.
+- Typing indicators: you see "is typing…" in the conversation and the chat
+  list, and the other person sees yours while you write (`send_typing` in
+  the settings turns yours off).
+- Groups: start a new group conversation from `n`.
+- Deleting: `D` in the chat list deletes the highlighted conversation from
+  Messages on the Mac, and from your other devices if Messages in iCloud is
+  on. It asks first and cannot be undone.
 - Starting a new conversation may need it, depending on the macOS version,
   since creating chats is one of the things the helper is for. If a new
   conversation fails to start, this is the likely reason.
 
-Typing indicators, replying to a specific message and deleting chats from
-Fizz are not built yet; they need the helper first.
+Searching message text is the one thing still missing: the server's own
+text search does not return on the versions tried, so it would need a local
+index.
 
 ### Setting it up
 
@@ -384,9 +400,9 @@ patched (OpenCore) Macs, which differ.
 ## Good to know
 
 - Sending uses the server's AppleScript method, so it works without the
-  BlueBubbles Private API. Tapbacks, edits, unsending and marking chats
-  read need that API and work once it is connected; typing indicators and
-  deleting chats need it too and are not implemented.
+  BlueBubbles Private API. Tapbacks, replies, edits, unsending, typing
+  indicators, new groups, deleting chats and marking chats read all need
+  that API, and work once it is connected.
 - Unread dots: Fizz remembers which conversations you have opened (in
   `~/.local/state/fizz/seen.json`), so they stay read across restarts.
   Marking them read on the Mac and your other devices needs the Private

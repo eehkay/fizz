@@ -45,6 +45,16 @@ pub enum AppEvent {
     Info(ServerInfo),
     /// The result of an update check: the newer commit, if there is one.
     Update(Option<String>),
+    /// The other side started or stopped typing in a chat.
+    Typing {
+        chat: String,
+        on: bool,
+    },
+    /// A conversation has been deleted on the server (or it refused).
+    Deleted {
+        chat: String,
+        result: Result<(), String>,
+    },
     /// An unsend or edit has been accepted (or refused).
     Changed {
         chat: String,
@@ -242,6 +252,18 @@ pub struct App {
     pub cache_sizes: Option<(u64, u64)>,
     /// A newer version's commit, when one has been pushed.
     pub update: Option<String>,
+    /// The message being replied to: its id, which part, and a short
+    /// description of it for the message box.
+    pub replying: Option<(String, usize, String)>,
+    /// The conversation waiting for "really delete?" to be answered.
+    pub deleting: Option<String>,
+    /// Chats where the other side is typing, and since when.
+    typing_theirs: HashMap<String, Instant>,
+    /// The chat we have told "typing…" to, if any.
+    typing_mine: Option<String>,
+    last_keystroke: Instant,
+    /// People already added while choosing who a new group is for.
+    pub pick_chosen: Vec<(String, String)>,
     /// The message waiting for "really unsend?" to be answered.
     pub unsending: Option<String>,
     /// The message being edited in the message box: its id, which part of
@@ -337,6 +359,12 @@ impl App {
             cpu_percent: None,
             cache_sizes: None,
             update: None,
+            replying: None,
+            deleting: None,
+            typing_theirs: HashMap::new(),
+            typing_mine: None,
+            last_keystroke: Instant::now(),
+            pick_chosen: Vec::new(),
             unsending: None,
             editing: None,
             reacting: None,
@@ -924,6 +952,129 @@ impl App {
         (chrono::Utc::now().timestamp_millis() - sent_ms) / 60_000
     }
 
+    fn start_replying(&mut self) {
+        let Some((message, part)) = self.selected_message() else {
+            return;
+        };
+        if message.pending || message.failed.is_some() {
+            return self.set_status("That message has not been sent yet".into());
+        }
+        let who = if message.is_from_me {
+            "yourself".to_string()
+        } else {
+            message
+                .handle
+                .as_ref()
+                .map_or("them".into(), |h| self.short_name_for(&h.address))
+        };
+        let label = format!("{who}: {}", message.summary());
+        self.replying = Some((message.guid.clone(), part, label));
+        self.focus = Focus::Compose;
+        if !self.helper {
+            self.set_status("Replies need the server's Private API helper; this may be refused".into());
+        }
+    }
+
+    // ----- typing indicators ---------------------------------------------
+
+    /// Whether the other side is typing in this chat right now.
+    pub fn is_typing(&self, chat: &str) -> bool {
+        self.typing_theirs
+            .get(chat)
+            // Some senders never say they stopped; do not show it forever.
+            .is_some_and(|since| since.elapsed() < Duration::from_secs(60))
+    }
+
+    /// Start or stop our own "typing…" so it matches what is on screen:
+    /// shown while there is unsent text that was touched recently.
+    fn sync_typing(&mut self) {
+        let wanted = self
+            .open
+            .clone()
+            .filter(|chat| !chat.starts_with("new:"))
+            .filter(|_| {
+                self.helper
+                    && crate::config::settings().messages.send_typing
+                    && self.focus == Focus::Compose
+                    && self.editing.is_none()
+                    && !self.input.is_empty()
+                    && self.last_keystroke.elapsed() < Duration::from_secs(8)
+            });
+        if wanted == self.typing_mine {
+            return;
+        }
+        let Some(api) = self.api.clone() else { return };
+        let (stop, start) = (self.typing_mine.take(), wanted.clone());
+        self.typing_mine = wanted;
+        tokio::spawn(async move {
+            if let Some(chat) = stop {
+                let _ = api.typing(&chat, false).await;
+            }
+            if let Some(chat) = start {
+                let _ = api.typing(&chat, true).await;
+            }
+        });
+    }
+
+    /// On the way out: make sure "typing…" is not left showing.
+    pub fn stop_typing(&mut self) -> Option<impl std::future::Future<Output = ()> + use<>> {
+        let chat = self.typing_mine.take()?;
+        let api = self.api.clone()?;
+        Some(async move {
+            let _ = api.typing(&chat, false).await;
+        })
+    }
+
+    // ----- deleting a conversation ---------------------------------------
+
+    fn start_deleting(&mut self) {
+        let Some(guid) = self.cursor.clone() else { return };
+        if guid.starts_with("new:") {
+            // Never sent, so there is nothing on the server to delete.
+            return self.forget_chat(&guid);
+        }
+        self.deleting = Some(guid);
+    }
+
+    fn delete_chat(&mut self) {
+        let Some(chat) = self.deleting.take() else { return };
+        match self.api.clone() {
+            Some(api) => {
+                self.set_status("Deleting…".into());
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = api.delete_chat(&chat).await.map_err(|e| e.to_string());
+                    let _ = tx.send(AppEvent::Deleted { chat, result });
+                });
+            }
+            None => self.forget_chat(&chat),
+        }
+    }
+
+    /// Remove a conversation from everything Fizz holds.
+    fn forget_chat(&mut self, guid: &str) {
+        let position = self.visible().iter().position(|c| c.guid == guid);
+        self.chats.retain(|c| c.guid != guid);
+        self.index.retain(|c| c.guid != guid);
+        self.convos.remove(guid);
+        self.drafts.remove(guid);
+        self.unread.remove(guid);
+        if self.open.as_deref() == Some(guid) {
+            self.open = None;
+            self.images.clear();
+            self.input.clear();
+            self.focus = Focus::List;
+        }
+        // Leave the cursor on whatever took its place in the list.
+        let next = {
+            let visible = self.visible();
+            position
+                .and_then(|p| visible.get(p).or(visible.last()))
+                .map(|c| c.guid.clone())
+        };
+        self.cursor = next;
+    }
+
     fn start_unsending(&mut self) {
         if let Some((guid, _, sent, _)) = self.selected_own("unsend") {
             self.unsending = Some(guid);
@@ -1211,6 +1362,7 @@ impl App {
         let address = sendable_address(address);
         let wanted = normalize_address(&address);
         self.picking = None;
+        self.pick_chosen.clear();
         self.filter.clear();
         let existing = self
             .chats
@@ -1248,8 +1400,32 @@ impl App {
         });
     }
 
+    /// Start a new group with everyone chosen in the picker.
+    fn start_group(&mut self, addresses: Vec<String>) {
+        self.picking = None;
+        self.pick_chosen.clear();
+        self.filter.clear();
+        let mut addresses: Vec<String> = addresses.iter().map(|a| sendable_address(a)).collect();
+        addresses.dedup();
+        match addresses.as_slice() {
+            [] => {}
+            [one] => self.start_chat(&one.clone()),
+            _ => {
+                self.open_draft_chat(Chat::draft_group(&addresses));
+                if !self.helper && self.api.is_some() {
+                    self.set_status(
+                        "New groups need the server's Private API helper; sending may be refused".into(),
+                    );
+                }
+            }
+        }
+    }
+
     fn open_draft(&mut self, address: &str) {
-        let draft = Chat::draft(address);
+        self.open_draft_chat(Chat::draft(address));
+    }
+
+    fn open_draft_chat(&mut self, draft: Chat) {
         let guid = draft.guid.clone();
         if !self.chats.iter().any(|c| c.guid == guid) {
             self.chats.push(draft);
@@ -1397,6 +1573,8 @@ impl App {
             return;
         }
         self.input.clear();
+        // A reply applies to the text that goes out now.
+        let reply = self.replying.take().map(|(guid, part, _)| (guid, part));
 
         let now = chrono::Utc::now().timestamp_millis();
         let mut jobs = Vec::new();
@@ -1414,7 +1592,11 @@ impl App {
                 ..Message::default()
             };
             match &item {
-                Outgoing::Text(text) => placeholder.text = Some(text.clone()),
+                Outgoing::Text(text) => {
+                    placeholder.text = Some(text.clone());
+                    placeholder.thread_originator_guid =
+                        reply.as_ref().map(|(guid, _)| guid.clone());
+                }
                 Outgoing::File(path) => {
                     placeholder.attachments = vec![Attachment {
                         guid: format!("{temp}-file"),
@@ -1439,6 +1621,12 @@ impl App {
         let convo = self.convos.entry(chat.clone()).or_default();
         convo.settle();
         convo.scroll = 0;
+        if self.api.is_none() {
+            // In the demo the other side "types" for a few seconds, so the
+            // indicator can be seen.
+            self.typing_theirs
+                .insert(chat.clone(), Instant::now() - Duration::from_secs(55));
+        }
 
         if let Some(api) = self.api.clone() {
             let tx = self.tx.clone();
@@ -1446,7 +1634,10 @@ impl App {
             tokio::spawn(async move {
                 for (temp, item) in jobs {
                     let result = match &item {
-                        Outgoing::Text(text) => api.send_text(&chat, &temp, text).await,
+                        Outgoing::Text(text) => {
+                            let reply_to = reply.as_ref().map(|(guid, part)| (guid.as_str(), *part));
+                            api.send_text(&chat, &temp, text, reply_to).await
+                        }
                         Outgoing::File(path) => api.send_attachment(&chat, &temp, path).await,
                     }
                     .map_err(|e| e.to_string());
@@ -1491,10 +1682,12 @@ impl App {
         });
         convo.settle();
         if let Some(api) = self.api.clone() {
-            let (tx, draft, address) = (self.tx.clone(), draft.to_string(), address.to_string());
+            let (tx, draft) = (self.tx.clone(), draft.to_string());
+            // A group's draft lists its addresses separated by commas.
+            let addresses: Vec<String> = address.split(',').map(str::to_string).collect();
             tokio::spawn(async move {
                 let result = api
-                    .new_chat(&address, &temp, &text)
+                    .new_chat(&addresses, &temp, &text)
                     .await
                     .map_err(|e| e.to_string());
                 let _ = tx.send(AppEvent::Started { draft, temp, result });
@@ -1537,6 +1730,24 @@ impl App {
                     });
                 }
             }
+            AppEvent::Typing { chat, on } => {
+                if on {
+                    self.typing_theirs.insert(chat, Instant::now());
+                } else {
+                    self.typing_theirs.remove(&chat);
+                }
+            }
+            AppEvent::Deleted { chat, result } => match result {
+                Ok(()) => {
+                    self.forget_chat(&chat);
+                    self.seen.remove(&chat);
+                    self.set_status("Conversation deleted".into());
+                }
+                Err(e) if e.contains("Helper is not connected") => self.set_status(
+                    "Deleting a conversation needs the server's Private API helper".into(),
+                ),
+                Err(e) => self.set_status(format!("Couldn't delete it: {e}")),
+            },
             AppEvent::Changed {
                 chat,
                 what,
@@ -1830,6 +2041,11 @@ impl App {
     }
 
     fn on_incoming(&mut self, message: Message) {
+        if !message.is_from_me {
+            for chat in &message.chats {
+                self.typing_theirs.remove(&chat.guid);
+            }
+        }
         let mut known_chat = false;
         for chat_ref in message.chats.clone() {
             let guid = chat_ref.guid;
@@ -1913,8 +2129,12 @@ impl App {
     /// How often to redraw without input: quickly while something is
     /// animating, otherwise only enough to expire status messages.
     pub fn tick_rate(&self) -> Duration {
+        let typing = self.open.as_deref().is_some_and(|chat| self.is_typing(chat));
         if self.splash() || self.opening() {
             Duration::from_millis(110)
+        } else if typing {
+            // Fast enough for the "is typing…" dots to move.
+            Duration::from_millis(400)
         } else {
             Duration::from_secs(1)
         }
@@ -1983,6 +2203,7 @@ impl App {
 
     pub fn on_tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+        self.sync_typing();
         if self.stats {
             self.sample_usage();
         }
@@ -1999,7 +2220,10 @@ impl App {
 
     pub fn on_terminal(&mut self, event: Event) {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => self.on_key(key),
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                self.on_key(key);
+                self.sync_typing();
+            }
             // Files dragged onto the terminal arrive as pasted paths.
             Event::Paste(text) => match files::dropped_paths(&text) {
                 Some(paths) => self.attach(paths),
@@ -2071,6 +2295,13 @@ impl App {
             }
             return;
         }
+        if self.deleting.is_some() {
+            match key.code {
+                KeyCode::Char('D') => self.delete_chat(),
+                _ => self.deleting = None,
+            }
+            return;
+        }
         if self.unsending.is_some() {
             match key.code {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('u') => self.unsend(),
@@ -2123,8 +2354,11 @@ impl App {
                 }
                 KeyCode::Char('n') => {
                     self.picking = Some(String::new());
+                    self.pick_chosen.clear();
                     self.pick_index = 0;
                 }
+                // Capital D, so it is never hit by accident.
+                KeyCode::Char('D') => self.start_deleting(),
                 KeyCode::Char('r') => {
                     self.set_status("Refreshing…".into());
                     self.fetch_chats(0);
@@ -2177,6 +2411,10 @@ impl App {
 
                 match key.code {
                     KeyCode::Esc if self.editing.is_some() => self.cancel_editing(),
+                    KeyCode::Esc if self.replying.is_some() => {
+                        self.replying = None;
+                        self.focus = Focus::Browse;
+                    }
                     KeyCode::Esc => self.focus = Focus::List,
                     KeyCode::Tab => self.browse(),
                     KeyCode::Enter if alt_or_shift => self.input.insert('\n'),
@@ -2208,6 +2446,7 @@ impl App {
                     _ => {}
                 }
                 if self.input.text().len() != before {
+                    self.last_keystroke = Instant::now();
                     // The text changed: start the popup afresh.
                     self.emoji_index = 0;
                     self.emoji_hidden = false;
@@ -2220,6 +2459,7 @@ impl App {
                 KeyCode::Char('s') => self.save_selected(),
                 KeyCode::Char('y') | KeyCode::Char('c') => self.copy_selected(),
                 KeyCode::Char('r') => self.start_reacting(),
+                KeyCode::Char('R') | KeyCode::Char('a') => self.start_replying(),
                 KeyCode::Char('u') => self.start_unsending(),
                 KeyCode::Char('e') => self.start_editing(),
                 KeyCode::Esc | KeyCode::Tab | KeyCode::Char('q') => self.focus = Focus::Compose,
@@ -2231,21 +2471,51 @@ impl App {
     fn on_pick_key(&mut self, key: KeyEvent) {
         let count = self.pick_candidates().len();
         match key.code {
-            KeyCode::Esc => self.picking = None,
+            KeyCode::Esc => {
+                self.picking = None;
+                self.pick_chosen.clear();
+            }
             KeyCode::Down if count > 0 => self.pick_index = (self.pick_index + 1).min(count - 1),
             KeyCode::Up => self.pick_index = self.pick_index.saturating_sub(1),
+            // Tab adds the highlighted person and keeps going: a group.
+            KeyCode::Tab => {
+                let highlighted = self
+                    .pick_candidates()
+                    .get(self.pick_index.min(count.saturating_sub(1)))
+                    .cloned();
+                if let Some((name, address)) = highlighted {
+                    let name = name.strip_prefix("Send to ").unwrap_or(&name).to_string();
+                    if !self.pick_chosen.iter().any(|(_, a)| *a == address) {
+                        self.pick_chosen.push((name, address));
+                    }
+                    self.picking = Some(String::new());
+                    self.pick_index = 0;
+                }
+            }
             KeyCode::Enter => {
-                let chosen = self
+                let typed = self.picking.as_deref().is_some_and(|q| !q.trim().is_empty());
+                let highlighted = self
                     .pick_candidates()
                     .get(self.pick_index.min(count.saturating_sub(1)))
                     .map(|(_, address)| address.clone());
-                match chosen {
-                    Some(address) => self.start_chat(&address),
-                    None => self.set_status("Type a name, a phone number or an email address".into()),
+                let mut everyone: Vec<String> =
+                    self.pick_chosen.iter().map(|(_, a)| a.clone()).collect();
+                // With people already added, Enter only takes the highlighted
+                // one too if something was typed to find them.
+                if let Some(address) = highlighted.filter(|_| typed || everyone.is_empty()) {
+                    everyone.push(address);
+                }
+                match everyone.len() {
+                    0 => self.set_status("Type a name, a phone number or an email address".into()),
+                    1 => self.start_chat(&everyone[0].clone()),
+                    _ => self.start_group(everyone),
                 }
             }
             KeyCode::Backspace => {
-                if let Some(query) = &mut self.picking {
+                let empty = self.picking.as_deref().is_none_or(str::is_empty);
+                if empty {
+                    self.pick_chosen.pop();
+                } else if let Some(query) = &mut self.picking {
                     query.pop();
                 }
                 self.pick_index = 0;

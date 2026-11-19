@@ -43,6 +43,7 @@ pub fn kind(path: &str) -> &'static str {
         p if p.starts_with("/chat/query") => "chat list",
         p if p.starts_with("/chat/new") => "new chat",
         p if p.ends_with("/read") => "mark read",
+        p if p.ends_with("/typing") => "typing",
         p if p.starts_with("/chat/") => "chat",
         p if p.starts_with("/contact") => "contacts",
         p if p.starts_with("/attachment") => "download",

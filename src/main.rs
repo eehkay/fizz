@@ -259,6 +259,10 @@ async fn event_loop(
             _ = tokio::time::sleep(app.tick_rate()) => app.on_tick(),
         }
     }
+    // Do not leave "typing…" showing on the other side after we have gone.
+    if let Some(stop) = app.stop_typing() {
+        let _ = tokio::time::timeout(Duration::from_secs(2), stop).await;
+    }
     Ok(())
 }
 

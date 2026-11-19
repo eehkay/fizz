@@ -229,14 +229,25 @@ impl Api {
     }
 
     /// Start a one-to-one conversation by sending its first message.
-    pub async fn new_chat(&self, address: &str, temp_guid: &str, text: &str) -> Result<Chat> {
+    pub async fn new_chat(
+        &self,
+        addresses: &[String],
+        temp_guid: &str,
+        text: &str,
+    ) -> Result<Chat> {
+        // Only the Private API can create a group.
+        let method = if addresses.len() > 1 {
+            "private-api"
+        } else {
+            send_method()
+        };
         self.post(
             "/chat/new",
             json!({
-                "addresses": [address],
+                "addresses": addresses,
                 "message": text,
                 "tempGuid": temp_guid,
-                "method": send_method(),
+                "method": method,
             }),
         )
         .await
@@ -256,17 +267,69 @@ impl Api {
         .await
     }
 
-    pub async fn send_text(&self, chat: &str, temp_guid: &str, text: &str) -> Result<Message> {
-        self.post(
-            "/message/text",
-            json!({
-                "chatGuid": chat,
-                "tempGuid": temp_guid,
-                "message": text,
-                "method": send_method(),
-            }),
-        )
-        .await
+    /// Send text. With `reply_to` (a message id and which part of it), it
+    /// goes as an inline reply, which only the Private API can do.
+    pub async fn send_text(
+        &self,
+        chat: &str,
+        temp_guid: &str,
+        text: &str,
+        reply_to: Option<(&str, usize)>,
+    ) -> Result<Message> {
+        let mut body = json!({
+            "chatGuid": chat,
+            "tempGuid": temp_guid,
+            "message": text,
+            "method": send_method(),
+        });
+        if let Some((message, part)) = reply_to {
+            body["method"] = json!("private-api");
+            body["selectedMessageGuid"] = json!(message);
+            body["partIndex"] = json!(part);
+        }
+        self.post("/message/text", body).await
+    }
+
+    /// Delete a whole conversation from Messages on the Mac. Needs the
+    /// Private API helper. There is no undo.
+    pub async fn delete_chat(&self, chat: &str) -> Result<()> {
+        let path = format!("/chat/{}", encode(chat));
+        let started = std::time::Instant::now();
+        let result = async {
+            let response = self
+                .http
+                .delete(format!("{}{path}", self.base))
+                .query(&self.auth())
+                .send()
+                .await
+                .map_err(friendly)?;
+            Self::unwrap::<Value>(response).await.map(|_| ())
+        }
+        .await;
+        crate::metrics::record(&self.metrics, "delete chat", started, result.is_ok());
+        result
+    }
+
+    /// Show or hide "is typing" for the other side. Private API only.
+    pub async fn typing(&self, chat: &str, on: bool) -> Result<()> {
+        let path = format!("/chat/{}/typing", encode(chat));
+        if on {
+            let _: Value = self.post(&path, json!({})).await?;
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let result = async {
+            let response = self
+                .http
+                .delete(format!("{}{path}", self.base))
+                .query(&self.auth())
+                .send()
+                .await
+                .map_err(friendly)?;
+            Self::unwrap::<Value>(response).await.map(|_| ())
+        }
+        .await;
+        self.timed(&path, started, result)
     }
 
     /// Send a file from disk into a chat.

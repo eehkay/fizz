@@ -175,6 +175,52 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.stats {
         draw_stats(frame, app, main);
     }
+    if let Some(guid) = app.deleting.clone() {
+        let name = app
+            .chats
+            .iter()
+            .find(|c| c.guid == guid)
+            .map_or("this conversation".to_string(), |c| app.chat_title(c));
+        let theme = app.theme.clone();
+        let w = main.width.saturating_sub(4).min(66);
+        let inner_w = usize::from(w.saturating_sub(6));
+        let mut lines = vec![Line::styled(
+            truncate(&format!("Delete the conversation with {name}?"), inner_w),
+            Style::new().fg(theme.bright).add_modifier(Modifier::BOLD),
+        )];
+        lines.push(Line::default());
+        for row in textwrap::wrap(
+            "It is removed from Messages on the Mac, and from your other devices \
+             if Messages in iCloud is on. Every message in it goes. This cannot be undone.",
+            inner_w.max(10),
+        ) {
+            lines.push(Line::styled(row.into_owned(), Style::new().fg(theme.text)));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled("Press ", Style::new().fg(theme.muted)),
+            Span::styled("D", Style::new().fg(theme.red).add_modifier(Modifier::BOLD)),
+            Span::styled(" again to delete. Any other key cancels.", Style::new().fg(theme.muted)),
+        ]));
+        let h = (lines.len() as u16 + 4).min(main.height);
+        let popup = Rect::new(
+            main.x + main.width.saturating_sub(w) / 2,
+            main.y + main.height.saturating_sub(h) / 2,
+            w.min(main.width),
+            h,
+        );
+        frame.render_widget(Clear, popup);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(theme.red))
+            .title(Span::styled(
+                " Delete conversation ",
+                Style::new().fg(theme.red).add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(popup).inner(ratatui::layout::Margin::new(2, 1));
+        frame.render_widget(block, popup);
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
 }
 
 // ----- stats screen ----------------------------------------------------
@@ -563,7 +609,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("↑ ↓  or  j k", "Move between conversations"),
             ("Enter", "Open the conversation and start typing"),
-            ("n", "New conversation: type a name, number or email"),
+            ("n", "New conversation: type a name, number or email; Tab adds more people for a group"),
+            ("D", "Delete the conversation everywhere (capital D; asks first)"),
             ("/", "Search every conversation and contact by name or number"),
             ("g  G", "Jump to the top or bottom"),
             ("r", "Refresh"),
@@ -592,6 +639,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Enter", "Open the picture, video or file, or the link in a message"),
             ("s", "Save the picture or file to Downloads"),
             ("c", "Copy the message's text (y works too)"),
+            ("R", "Reply to that message (capital R, or a)"),
             ("r", "React: pick a tapback (needs the server's Private API helper)"),
             ("e", "Edit a message you sent (within about 15 minutes)"),
             ("u", "Unsend a message you sent (within about 2 minutes)"),
@@ -731,7 +779,12 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme.clone();
     let focused = app.focus == Focus::List;
     let title = if let Some(query) = &app.picking {
-        format!("To: {query}▏")
+        let added: String = app
+            .pick_chosen
+            .iter()
+            .map(|(name, _)| format!("{}, ", name.split_whitespace().next().unwrap_or(name)))
+            .collect();
+        format!("To: {added}{query}▏")
     } else if app.filtering || !app.filter.is_empty() {
         format!("Search: {}{}", app.filter, if app.filtering { "▏" } else { "" })
     } else {
@@ -878,7 +931,9 @@ fn chat_row(app: &App, chat: &Chat, w: usize, cursor: bool, open: bool) -> [Line
         Span::styled(format!("{stamp} "), base.fg(theme.muted)),
     ]);
 
+    let typing = app.is_typing(&chat.guid);
     let text = match &chat.last_message {
+        _ if typing => "typing…".to_string(),
         Some(message) => preview(message),
         None if chat.is_draft() && chat.touched == 0 => {
             // A contact found by search, with no conversation yet.
@@ -992,6 +1047,12 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.editing.is_some() {
         block = block.title(Span::styled(
             " Editing your message · Enter saves · Esc cancels ",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some((_, _, what)) = &app.replying {
+        let room = usize::from(input_area.width).saturating_sub(30);
+        block = block.title(Span::styled(
+            format!(" ↳ Replying to {} · Esc cancels ", truncate(what, room.max(10))),
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         ));
     }
@@ -1189,6 +1250,20 @@ fn draw_timeline(frame: &mut Frame, app: &mut App, chat: &Chat, view: Rect) {
                 Line::styled("Loading earlier messages…", Style::new().fg(theme.muted)).centered(),
             ),
         );
+    }
+
+    if app.is_typing(&chat.guid) {
+        let who = match chat.participants.as_slice() {
+            [one] if !chat.is_group() => app.short_name_for(&one.address),
+            _ => "Someone".to_string(),
+        };
+        // The dots count up, so it reads as alive.
+        let dots = ".".repeat(1 + (app.frame % 3) as usize);
+        items.push(Item::Line(Line::default()));
+        items.push(Item::Line(Line::styled(
+            format!(" {who} is typing{dots}"),
+            Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
+        )));
     }
 
     let total: usize = items.iter().map(Item::rows).sum();
@@ -1619,20 +1694,24 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         &[("esc", "close help")]
     } else if app.filtering {
         &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("esc", "cancel")]
-    } else if app.focus == Focus::List {
-        &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("/", "search"), ("?", "help"), ("q", "quit")]
+    } else if app.deleting.is_some() {
+        &[("D", "delete for good"), ("any other key", "cancel")]
     } else if app.unsending.is_some() {
         &[("⏎", "unsend"), ("esc", "cancel")]
+    } else if app.replying.is_some() && app.focus == Focus::Compose {
+        &[("⏎", "send reply"), ("esc", "cancel reply")]
     } else if app.editing.is_some() {
         &[("⏎", "save edit"), ("esc", "cancel")]
     } else if app.reacting.is_some() {
         &[("←→", "choose"), ("1-6", "pick"), ("⏎", "send"), ("esc", "cancel")]
     } else if app.picking.is_some() {
-        &[("type", "name or number"), ("↑↓", "choose"), ("⏎", "start"), ("esc", "cancel")]
+        &[("type", "name or number"), ("↑↓", "choose"), ("tab", "add another"), ("⏎", "start"), ("esc", "cancel")]
+    } else if app.focus == Focus::List {
+        &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("/", "search"), ("?", "help"), ("q", "quit")]
     } else if app.focus == Focus::Browse && app.selected_text().is_some() {
-        &[("↑↓", "select"), ("r", "react"), ("c", "copy"), ("e", "edit"), ("u", "unsend"), ("⏎", "open link"), ("?", "help")]
+        &[("↑↓", "select"), ("R", "reply"), ("r", "react"), ("c", "copy"), ("e", "edit"), ("u", "unsend"), ("?", "help")]
     } else if app.focus == Focus::Browse {
-        &[("↑↓", "select"), ("r", "react"), ("⏎", "open"), ("s", "save"), ("?", "help"), ("esc", "back")]
+        &[("↑↓", "select"), ("⏎", "open"), ("s", "save"), ("R", "reply"), ("r", "react"), ("?", "help")]
     } else if !app.emoji_matches().is_empty() {
         &[("↑↓", "choose"), ("tab", "insert"), ("esc", "dismiss")]
     } else if !app.pending_files.is_empty() {

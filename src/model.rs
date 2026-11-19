@@ -282,6 +282,24 @@ impl Chat {
         }
     }
 
+    /// As [`Chat::draft`], for a new group. Its id lists the addresses.
+    pub fn draft_group(addresses: &[String]) -> Self {
+        Chat {
+            guid: format!("new:{}", addresses.join(",")),
+            chat_identifier: addresses.join(", "),
+            style: 43,
+            participants: addresses
+                .iter()
+                .map(|address| Handle {
+                    address: address.clone(),
+                    service: None,
+                })
+                .collect(),
+            touched: chrono::Utc::now().timestamp_millis(),
+            ..Chat::default()
+        }
+    }
+
     pub fn is_draft(&self) -> bool {
         self.guid.starts_with("new:")
     }

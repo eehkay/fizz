@@ -117,6 +117,25 @@ async fn socket(
         let client = ClientBuilder::new(url.clone())
             .on("new-message", on_message.clone())
             .on("updated-message", on_message)
+            .on("typing-indicator", {
+                let tx = tx.clone();
+                move |payload: Payload, _: Client| {
+                    let tx = tx.clone();
+                    async move {
+                        if let Payload::Text(values) = payload
+                            && let Some(event) = values.first()
+                            && let Some(chat) = event.get("guid").and_then(|g| g.as_str())
+                        {
+                            let on = event.get("display").and_then(|d| d.as_bool()).unwrap_or(false);
+                            let _ = tx.send(AppEvent::Typing {
+                                chat: chat.to_string(),
+                                on,
+                            });
+                        }
+                    }
+                    .boxed()
+                }
+            })
             .on(rust_socketio::Event::Connect, mark(true))
             .on(rust_socketio::Event::Close, mark(false))
             .on(rust_socketio::Event::Error, mark(false))
