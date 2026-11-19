@@ -627,6 +627,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+V", "Attach a picture from the clipboard"),
             ("Backspace", "On an empty box: remove the last attached file"),
             ("Ctrl+W  Ctrl+U", "Delete a word, or everything typed"),
+            ("Ctrl+R", "Try again with a message that failed to send"),
             ("PgUp PgDn  ↑ ↓", "Scroll; older messages load at the top"),
             ("Tab", "Select messages, pictures and files"),
             ("Esc", "Back to the chat list"),
@@ -1640,7 +1641,7 @@ fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
         // Delivery state, under the newest message only and only for ours.
         if mine && last_guid == Some(message.guid.as_str()) && message.date_retracted.is_none() {
             let (text, color) = if let Some(reason) = &message.failed {
-                (format!("Not sent: {reason}"), theme.red)
+                (format!("Not sent: {reason} · Ctrl+R retries"), theme.red)
             } else if message.error != 0 {
                 ("Not delivered".to_string(), theme.red)
             } else if message.pending {
@@ -1658,7 +1659,7 @@ fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
                 Span::styled(text, Style::new().fg(color)),
             ])));
         } else if let Some(reason) = &message.failed {
-            let text = truncate(&format!("Not sent: {reason}"), w);
+            let text = truncate(&format!("Not sent: {reason} · Ctrl+R retries"), w);
             items.push(Item::Line(Line::from(vec![
                 Span::raw(pad(w.saturating_sub(width(&text)))),
                 Span::styled(text, Style::new().fg(theme.red)),
@@ -1708,6 +1709,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         &[("type", "name or number"), ("↑↓", "choose"), ("tab", "add another"), ("⏎", "start"), ("esc", "cancel")]
     } else if app.focus == Focus::List {
         &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("/", "search"), ("?", "help"), ("q", "quit")]
+    } else if app.focus == Focus::Browse && app.selected_failed() {
+        &[("⏎", "try again"), ("x", "discard"), ("esc", "back")]
     } else if app.focus == Focus::Browse && app.selected_text().is_some() {
         &[("↑↓", "select"), ("R", "reply"), ("r", "react"), ("c", "copy"), ("e", "edit"), ("u", "unsend"), ("?", "help")]
     } else if app.focus == Focus::Browse {

@@ -212,6 +212,7 @@ The essentials:
 |              | `:name`                     | Emoji: `:thu`, then `↑` `↓` and `Tab`; or finish it as `:fire:` |
 |              | drop a file on the window   | Attach it                    |
 |              | `Ctrl+V`                    | Attach a picture from the clipboard |
+|              | `Ctrl+R`                    | Try again with a message that failed to send |
 |              | `Tab`                       | Select messages, pictures and files |
 |              | `Esc`                       | Back to the chat list        |
 | Selecting    | `↑` `↓`                     | Move between messages, pictures, files |
@@ -266,6 +267,18 @@ conversation is open. They appear above the message box; Enter sends them,
 followed by whatever you typed. This works in any terminal that pastes the
 path of a dropped file, which most do. `Ctrl+V` attaches a picture from the
 clipboard (Wayland, needs `wl-clipboard`).
+
+## When a message fails to send
+
+It stays in the conversation marked "Not sent" with the reason. `Ctrl+R`
+sends the most recent failure again without disturbing what you are typing.
+To pick a particular one, select it with `Tab`: Enter tries again, `x`
+discards it.
+
+If the server could not be reached at all, Fizz retries by itself a couple
+of times first, since nothing was sent and there is no risk of a duplicate.
+For any other failure it leaves the decision to you, because the message
+may have gone through before the connection dropped.
 
 ## Notifications
 

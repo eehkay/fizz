@@ -36,6 +36,10 @@ impl Api {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(90))
+            // The server closes connections that sit idle for a few seconds.
+            // Reusing one of those is what makes a send fail out of the
+            // blue, so let them go before the server does.
+            .pool_idle_timeout(Duration::from_secs(3))
             .build()?;
         Ok(Api {
             http,
@@ -449,13 +453,28 @@ async fn download_error(response: reqwest::Response) -> anyhow::Error {
 fn friendly(err: reqwest::Error) -> anyhow::Error {
     let err = err.without_url();
     if err.is_connect() {
-        anyhow!("can't reach the server")
+        anyhow!(UNREACHABLE)
     } else if err.is_timeout() {
         anyhow!("the server took too long to answer")
     } else {
-        anyhow!("{err}")
+        // reqwest's own wording ("error sending request") says little; the
+        // cause underneath is what tells you what happened.
+        let mut cause: &dyn std::error::Error = &err;
+        while let Some(deeper) = cause.source() {
+            cause = deeper;
+        }
+        let detail = cause.to_string();
+        if detail.is_empty() || detail == err.to_string() {
+            anyhow!("the connection to the server failed")
+        } else {
+            anyhow!("the connection to the server failed ({detail})")
+        }
     }
 }
+
+/// The wording [`friendly`] uses when nothing reached the server at all,
+/// which is the one failure that is always safe to retry.
+pub const UNREACHABLE: &str = "can't reach the server";
 
 #[cfg(test)]
 mod tests {

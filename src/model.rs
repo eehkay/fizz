@@ -91,6 +91,12 @@ pub struct Message {
     /// Set locally when sending failed.
     #[serde(skip)]
     pub failed: Option<String>,
+    /// The file a message of ours is sending, kept so it can be retried.
+    #[serde(skip)]
+    pub local_file: Option<std::path::PathBuf>,
+    /// For a reply of ours: which part of the original it answers.
+    #[serde(skip)]
+    pub reply_part: usize,
 }
 
 /// The six classic tapbacks: the server's name for each and how it is shown.

@@ -264,6 +264,8 @@ pub struct App {
     last_keystroke: Instant,
     /// People already added while choosing who a new group is for.
     pub pick_chosen: Vec<(String, String)>,
+    /// Demo messages that have already had their pretend failure.
+    demo_failed: HashSet<String>,
     /// The message waiting for "really unsend?" to be answered.
     pub unsending: Option<String>,
     /// The message being edited in the message box: its id, which part of
@@ -365,6 +367,7 @@ impl App {
             typing_mine: None,
             last_keystroke: Instant::now(),
             pick_chosen: Vec::new(),
+            demo_failed: HashSet::new(),
             unsending: None,
             editing: None,
             reacting: None,
@@ -950,6 +953,67 @@ impl App {
     /// How long ago a message was sent, in minutes.
     fn minutes_since(sent_ms: i64) -> i64 {
         (chrono::Utc::now().timestamp_millis() - sent_ms) / 60_000
+    }
+
+    // ----- retrying a failed send ----------------------------------------
+
+    /// Whether the selected message is one of ours that failed to send.
+    pub fn selected_failed(&self) -> bool {
+        self.selected_message()
+            .is_some_and(|(m, _)| m.failed.is_some())
+    }
+
+    /// Send a failed message again: the one given, or the newest failure
+    /// in the open conversation.
+    fn retry_failed(&mut self, guid: Option<String>) {
+        if self.editing.is_some() {
+            return;
+        }
+        let Some(chat) = self.open.clone() else { return };
+        let Some(convo) = self.convos.get_mut(&chat) else {
+            return;
+        };
+        let found = convo.messages.iter().rposition(|m| {
+            m.failed.is_some() && guid.as_ref().is_none_or(|g| &m.guid == g)
+        });
+        let Some(index) = found else {
+            return self.set_status("Nothing here failed to send".into());
+        };
+        let failed = convo.messages.remove(index);
+        // Put it back through the ordinary send path, without disturbing
+        // whatever is being written at the moment.
+        let draft = self.input.take();
+        let files = std::mem::take(&mut self.pending_files);
+        let replying = self.replying.take();
+        match failed.local_file {
+            Some(path) => self.pending_files = vec![path],
+            None => self.input.set(failed.body()),
+        }
+        if let Some(original) = failed.thread_originator_guid {
+            self.replying = Some((original, failed.reply_part, String::new()));
+        }
+        self.send();
+        self.input.set(draft);
+        self.pending_files = files;
+        self.replying = replying;
+        self.selected = None;
+        self.set_status("Trying again…".into());
+    }
+
+    /// Give up on a failed message and remove it from the conversation.
+    fn discard_failed(&mut self) {
+        let Some(guid) = self
+            .selected_message()
+            .filter(|(m, _)| m.failed.is_some())
+            .map(|(m, _)| m.guid.clone())
+        else {
+            return;
+        };
+        if let Some(convo) = self.open.as_ref().and_then(|g| self.convos.get_mut(g)) {
+            convo.messages.retain(|m| m.guid != guid);
+        }
+        self.selected = None;
+        self.focus = Focus::Compose;
     }
 
     fn start_replying(&mut self) {
@@ -1596,8 +1660,20 @@ impl App {
                     placeholder.text = Some(text.clone());
                     placeholder.thread_originator_guid =
                         reply.as_ref().map(|(guid, _)| guid.clone());
+                    placeholder.reply_part = reply.as_ref().map_or(0, |(_, part)| *part);
+                    // In the demo, a message containing "!fail" fails the
+                    // first time, so retrying can be tried out.
+                    if self.api.is_none()
+                        && text.contains("!fail")
+                        && self.demo_failed.insert(text.clone())
+                    {
+                        placeholder.is_delivered = false;
+                        placeholder.failed =
+                            Some("the connection to the server failed (demo)".into());
+                    }
                 }
                 Outgoing::File(path) => {
+                    placeholder.local_file = Some(path.clone());
                     placeholder.attachments = vec![Attachment {
                         guid: format!("{temp}-file"),
                         transfer_name: path
@@ -1633,14 +1709,27 @@ impl App {
             // One at a time, so they arrive in the order shown.
             tokio::spawn(async move {
                 for (temp, item) in jobs {
-                    let result = match &item {
-                        Outgoing::Text(text) => {
-                            let reply_to = reply.as_ref().map(|(guid, part)| (guid.as_str(), *part));
-                            api.send_text(&chat, &temp, text, reply_to).await
+                    let mut tries = 0;
+                    let result = loop {
+                        tries += 1;
+                        let attempt = match &item {
+                            Outgoing::Text(text) => {
+                                let reply_to =
+                                    reply.as_ref().map(|(guid, part)| (guid.as_str(), *part));
+                                api.send_text(&chat, &temp, text, reply_to).await
+                            }
+                            Outgoing::File(path) => api.send_attachment(&chat, &temp, path).await,
                         }
-                        Outgoing::File(path) => api.send_attachment(&chat, &temp, path).await,
-                    }
-                    .map_err(|e| e.to_string());
+                        .map_err(|e| e.to_string());
+                        // If the server was never reached, nothing was sent,
+                        // so trying again cannot produce a duplicate.
+                        match &attempt {
+                            Err(e) if e == crate::api::UNREACHABLE && tries < 3 => {
+                                tokio::time::sleep(Duration::from_millis(1500)).await;
+                            }
+                            _ => break attempt,
+                        }
+                    };
                     let sent = AppEvent::Sent {
                         chat: chat.clone(),
                         temp,
@@ -1916,7 +2005,7 @@ impl App {
                             m.pending = false;
                             m.failed = Some(e.clone());
                         }
-                        self.set_status(format!("Message not sent: {e}"));
+                        self.set_status(format!("Message not sent: {e}. Ctrl+R retries"));
                     }
                 }
                 self.convos.entry(chat).or_default().settle();
@@ -2442,6 +2531,7 @@ impl App {
                     KeyCode::Char('u') if ctrl => self.input.clear(),
                     KeyCode::Char('w') if ctrl => self.input.delete_word(),
                     KeyCode::Char('v') if ctrl => self.paste_clipboard(),
+                    KeyCode::Char('r') if ctrl => self.retry_failed(None),
                     KeyCode::Char(c) if !ctrl => self.input.insert(c),
                     _ => {}
                 }
@@ -2455,6 +2545,16 @@ impl App {
             Focus::Browse => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
                 KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
+                KeyCode::Enter if self.selected_failed() => {
+                    let guid = self.selected_message().map(|(m, _)| m.guid.clone());
+                    self.retry_failed(guid);
+                    self.focus = Focus::Compose;
+                }
+                KeyCode::Char('x') | KeyCode::Delete | KeyCode::Backspace
+                    if self.selected_failed() =>
+                {
+                    self.discard_failed()
+                }
                 KeyCode::Enter | KeyCode::Char('o') => self.open_selected(),
                 KeyCode::Char('s') => self.save_selected(),
                 KeyCode::Char('y') | KeyCode::Char('c') => self.copy_selected(),
