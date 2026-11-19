@@ -118,6 +118,27 @@ impl Api {
         .await
     }
 
+    /// Add a tapback to a message, or remove one by prefixing its name
+    /// with `-`. The server only allows this with the Private API helper.
+    pub async fn react(
+        &self,
+        chat: &str,
+        message: &str,
+        reaction: &str,
+        part: usize,
+    ) -> Result<Message> {
+        self.post(
+            "/message/react",
+            json!({
+                "chatGuid": chat,
+                "selectedMessageGuid": message,
+                "reaction": reaction,
+                "partIndex": part,
+            }),
+        )
+        .await
+    }
+
     /// Mark a chat read on the Mac, which clears it on the user's other
     /// devices. The server only allows this with the Private API helper.
     pub async fn mark_read(&self, chat: &str) -> Result<()> {

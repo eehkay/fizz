@@ -20,7 +20,7 @@ use crate::files::{self, Then};
 use crate::images::{self, ImageState};
 use crate::input::Input;
 use crate::model::{
-    Attachment, Chat, Contact, Message, Reaction, normalize_address, sendable_address,
+    Attachment, Chat, Contact, Message, Reaction, TAPBACKS, normalize_address, sendable_address,
 };
 use crate::theme::Theme;
 
@@ -40,6 +40,11 @@ pub enum AppEvent {
     ChatDetail(Chat),
     /// Whether the server's Private API helper is connected.
     Helper(bool),
+    /// A tapback we sent has been accepted (or refused).
+    Reacted {
+        chat: String,
+        result: Result<Message, String>,
+    },
     /// A slice of the server's full chat list, for searching by name.
     Index(Vec<Chat>),
     Contacts(Vec<Contact>),
@@ -213,6 +218,8 @@ pub struct App {
     pub convos: HashMap<String, Convo>,
     pub images: HashMap<String, ImageState>,
     pub focus: Focus,
+    /// The tapback picker, and which of the six is highlighted.
+    pub reacting: Option<usize>,
     /// The attachment highlighted while browsing.
     pub selected: Option<String>,
     /// Ask the next draw to scroll the highlighted attachment into view.
@@ -290,6 +297,7 @@ impl App {
             convos: HashMap::new(),
             images: HashMap::new(),
             focus: Focus::List,
+            reacting: None,
             selected: None,
             reveal: false,
             hits: Vec::new(),
@@ -811,6 +819,91 @@ impl App {
             .find(|m| m.guid == guid)
     }
 
+    /// The message behind the current selection, and which part of it is
+    /// selected (attachments count from zero, the text comes after them).
+    fn selected_message(&self) -> Option<(&Message, usize)> {
+        let key = self.selected.as_deref()?;
+        let convo = self.open.as_ref().and_then(|g| self.convos.get(g))?;
+        let parts = |m: &Message| m.attachments.iter().filter(|a| !a.is_plugin_payload()).count();
+        if let Some(guid) = key.strip_prefix("text:") {
+            let message = convo.messages.iter().find(|m| m.guid == guid)?;
+            return Some((message, parts(message)));
+        }
+        convo.messages.iter().find_map(|m| {
+            m.attachments
+                .iter()
+                .filter(|a| !a.is_plugin_payload())
+                .position(|a| a.guid == key)
+                .map(|index| (m, index))
+        })
+    }
+
+    /// The tapback of mine already on the selected message, if any.
+    fn my_tapback(&self) -> Option<usize> {
+        let (message, _) = self.selected_message()?;
+        let convo = self.open.as_ref().and_then(|g| self.convos.get(g))?;
+        let (_, glyph) = convo
+            .reactions
+            .get(&message.guid)?
+            .iter()
+            .find(|(who, _)| who == "me")?;
+        TAPBACKS.iter().position(|(_, g)| g == glyph)
+    }
+
+    fn start_reacting(&mut self) {
+        match self.selected_message() {
+            Some((message, _)) if message.pending || message.failed.is_some() => {
+                self.set_status("That message has not been sent yet".into())
+            }
+            Some(_) => self.reacting = Some(self.my_tapback().unwrap_or(0)),
+            None => {}
+        }
+    }
+
+    /// Send the chosen tapback; choosing the one already there removes it.
+    fn send_reaction(&mut self, choice: usize) {
+        self.reacting = None;
+        let Some(chat) = self.open.clone() else { return };
+        let Some((message, part)) = self.selected_message() else {
+            return;
+        };
+        let (target, part) = (message.guid.clone(), part);
+        let (kind, glyph) = TAPBACKS[choice.min(TAPBACKS.len() - 1)];
+        let reaction = if self.my_tapback() == Some(choice) {
+            format!("-{kind}")
+        } else {
+            kind.to_string()
+        };
+        match self.api.clone() {
+            Some(api) => {
+                self.set_status(format!("Sending {glyph}…"));
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    let result = api
+                        .react(&chat, &target, &reaction, part)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx.send(AppEvent::Reacted { chat, result });
+                });
+            }
+            None => {
+                // The demo applies it straight away.
+                self.temp_counter += 1;
+                let event = Message {
+                    guid: format!("demo-reaction-{}", self.temp_counter),
+                    is_from_me: true,
+                    date_created: chrono::Utc::now().timestamp_millis(),
+                    associated_message_guid: Some(format!("p:{part}/{target}")),
+                    associated_message_type: Some(serde_json::Value::String(reaction)),
+                    ..Message::default()
+                };
+                let convo = self.convos.entry(chat).or_default();
+                convo.absorb(event);
+                convo.settle();
+            }
+        }
+    }
+
     fn browse(&mut self) {
         let all = self.targets();
         let Some(newest) = all.last() else {
@@ -1248,6 +1341,18 @@ impl App {
                     });
                 }
             }
+            AppEvent::Reacted { chat, result } => match result {
+                Ok(event) => {
+                    let convo = self.convos.entry(chat).or_default();
+                    convo.absorb(event);
+                    convo.settle();
+                    self.status = None;
+                }
+                Err(e) if e.contains("Helper is not connected") => self.set_status(
+                    "Tapbacks need the Private API helper connected on the server".into(),
+                ),
+                Err(e) => self.set_status(format!("Couldn't react: {e}")),
+            },
             AppEvent::ChatDetail(detail) => {
                 if let Some(chat) = self.chats.iter_mut().find(|c| c.guid == detail.guid) {
                     chat.participants = detail.participants;
@@ -1662,6 +1767,23 @@ impl App {
             }
             return;
         }
+        if let Some(chosen) = self.reacting {
+            let last = TAPBACKS.len() - 1;
+            match key.code {
+                KeyCode::Left | KeyCode::Char('h') => {
+                    self.reacting = Some(chosen.checked_sub(1).unwrap_or(last))
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                    self.reacting = Some(if chosen >= last { 0 } else { chosen + 1 })
+                }
+                KeyCode::Enter | KeyCode::Char(' ') => self.send_reaction(chosen),
+                // 1 to 6 pick and send in one press.
+                KeyCode::Char(c @ '1'..='6') => self.send_reaction(c as usize - '1' as usize),
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('r') => self.reacting = None,
+                _ => {}
+            }
+            return;
+        }
         let page = (self.view_rows / 2).max(1) as isize;
         match key.code {
             KeyCode::PageUp => return self.scroll_by(page),
@@ -1782,6 +1904,7 @@ impl App {
                 KeyCode::Enter | KeyCode::Char('o') => self.open_selected(),
                 KeyCode::Char('s') => self.save_selected(),
                 KeyCode::Char('y') | KeyCode::Char('c') => self.copy_selected(),
+                KeyCode::Char('r') => self.start_reacting(),
                 KeyCode::Esc | KeyCode::Tab | KeyCode::Char('q') => self.focus = Focus::Compose,
                 _ => {}
             },

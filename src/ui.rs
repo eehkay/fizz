@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Convo, Focus};
 use crate::images::ImageState;
-use crate::model::{Chat, Message};
+use crate::model::{Chat, Message, TAPBACKS};
 use crate::theme::Theme;
 
 const NARROW: u16 = 76;
@@ -259,6 +259,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Enter", "Open the picture, video or file, or the link in a message"),
             ("s", "Save the picture or file to Downloads"),
             ("y", "Copy the message's text"),
+            ("r", "React: pick a tapback (needs the server's Private API helper)"),
             ("Esc", "Back to typing"),
         ],
     ),
@@ -680,6 +681,42 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
             .collect();
         frame.render_widget(Paragraph::new(shown), inner);
     }
+    // The tapback picker floats in the same place.
+    if let Some(chosen) = app.reacting {
+        const CELL: u16 = 6;
+        let w = CELL * TAPBACKS.len() as u16 + 2;
+        let popup = Rect::new(
+            input_area.x + 1,
+            input_area.y.saturating_sub(3),
+            w.min(area.width),
+            3.min(input_area.y.saturating_sub(area.y)),
+        );
+        if popup.height == 3 {
+            frame.render_widget(Clear, popup);
+            let block = Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::new().fg(theme.accent))
+                .title(Span::styled(" React ", Style::new().fg(theme.accent)));
+            let row = block.inner(popup);
+            frame.render_widget(block, popup);
+            for (i, (_, glyph)) in TAPBACKS.iter().enumerate() {
+                let style = if i == chosen {
+                    Style::new().fg(theme.on_accent).bg(theme.accent)
+                } else {
+                    Style::new().fg(theme.bright)
+                };
+                // Centre each glyph in its cell, with its number beside it.
+                let label = format!(" {} {glyph}", i + 1);
+                let fill = usize::from(CELL).saturating_sub(width(&label));
+                let cell = Rect::new(row.x + i as u16 * CELL, row.y, CELL, 1);
+                frame.render_widget(
+                    Span::styled(format!("{label}{}", pad(fill)), style),
+                    cell.intersection(row),
+                );
+            }
+        }
+    }
+
     // Emoji suggestions float just above the message box.
     let matches = app.emoji_matches();
     if !matches.is_empty() {
@@ -1207,12 +1244,14 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("esc", "cancel")]
     } else if app.focus == Focus::List {
         &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("/", "search"), ("?", "help"), ("q", "quit")]
+    } else if app.reacting.is_some() {
+        &[("←→", "choose"), ("1-6", "pick"), ("⏎", "send"), ("esc", "cancel")]
     } else if app.picking.is_some() {
         &[("type", "name or number"), ("↑↓", "choose"), ("⏎", "start"), ("esc", "cancel")]
     } else if app.focus == Focus::Browse && app.selected_text().is_some() {
-        &[("↑↓", "select"), ("y", "copy"), ("⏎", "open link"), ("?", "help"), ("esc", "back")]
+        &[("↑↓", "select"), ("r", "react"), ("y", "copy"), ("⏎", "open link"), ("?", "help"), ("esc", "back")]
     } else if app.focus == Focus::Browse {
-        &[("↑↓", "select"), ("⏎", "open"), ("s", "save"), ("?", "help"), ("esc", "back")]
+        &[("↑↓", "select"), ("r", "react"), ("⏎", "open"), ("s", "save"), ("?", "help"), ("esc", "back")]
     } else if !app.emoji_matches().is_empty() {
         &[("↑↓", "choose"), ("tab", "insert"), ("esc", "dismiss")]
     } else if !app.pending_files.is_empty() {

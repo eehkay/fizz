@@ -92,6 +92,16 @@ pub struct Message {
     pub failed: Option<String>,
 }
 
+/// The six classic tapbacks: the server's name for each and how it is shown.
+pub const TAPBACKS: [(&str, &str); 6] = [
+    ("love", "♥"),
+    ("like", "👍"),
+    ("dislike", "👎"),
+    ("laugh", "😂"),
+    ("emphasize", "‼"),
+    ("question", "?"),
+];
+
 /// A tapback, resolved from the server's string or numeric type.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reaction {
@@ -202,14 +212,10 @@ impl Message {
         if name.starts_with('-') {
             return Some(Reaction::Remove);
         }
-        let glyph = match name.as_str() {
-            "love" => "♥",
-            "like" => "👍",
-            "dislike" => "👎",
-            "laugh" => "😂",
-            "emphasize" => "‼",
-            "question" => "?",
-            _ => match &self.associated_message_emoji {
+        let known = TAPBACKS.iter().find(|(kind, _)| *kind == name);
+        let glyph = match known {
+            Some((_, glyph)) => *glyph,
+            None => match &self.associated_message_emoji {
                 Some(e) if !e.is_empty() => e.as_str(),
                 // Stickers, edits and anything newer: keep out of the timeline.
                 _ => return Some(Reaction::Remove),

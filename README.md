@@ -185,6 +185,7 @@ The essentials:
 |              | `Enter`                     | Open the picture, video, file, or the link in a message |
 |              | `s`                         | Save to `~/Downloads`        |
 |              | `y`                         | Copy the message's text      |
+|              | `r`                         | React with a tapback (needs the Private API helper) |
 | Anywhere     | `?` / `F1`                  | Help                         |
 |              | `Ctrl+C`                    | Quit                         |
 
@@ -278,12 +279,15 @@ What Fizz uses it for today:
   it.
 - Opening a chat marks it read on the Mac, which clears it on your other
   devices.
+- Tapbacks: select a message with `Tab`, press `r`, and pick one of the
+  six (arrows and Enter, or `1` to `6`). Picking the one you already gave
+  removes it.
 - Starting a new conversation may need it, depending on the macOS version,
   since creating chats is one of the things the helper is for. If a new
   conversation fails to start, this is the likely reason.
 
-Sending tapbacks, edits, typing indicators and deleting chats from Fizz are
-not built yet; they need the helper first.
+Edits, typing indicators, searching message text and deleting chats from
+Fizz are not built yet; they need the helper first.
 
 ### Setting it up
 
@@ -343,8 +347,9 @@ patched (OpenCore) Macs, which differ.
 ## Good to know
 
 - Sending uses the server's AppleScript method, so it works without the
-  BlueBubbles Private API. Sending tapbacks, edits and typing indicators,
-  and deleting chats, need that API and are not implemented.
+  BlueBubbles Private API. Tapbacks and marking chats read need that API
+  and work once it is connected; edits, typing indicators and deleting
+  chats need it too and are not implemented.
 - Unread dots: Fizz remembers which conversations you have opened (in
   `~/.local/state/fizz/seen.json`), so they stay read across restarts.
   Marking them read on the Mac and your other devices needs the Private
