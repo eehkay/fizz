@@ -2,6 +2,10 @@
 name = "fizz"
 version = "0.1.0"
 edition = "2024"
+description = "iMessage in your terminal, through a BlueBubbles server"
+license = "MIT"
+repository = "https://github.com/eehkay/fizz"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.104"

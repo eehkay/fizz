@@ -45,9 +45,6 @@ cd fizz
 cargo install --path .
 ```
 
-The repository is private: you need to have accepted the invitation and be
-signed in to GitHub on that machine (`gh auth login` is the easy way).
-
 This puts `fizz` in `~/.cargo/bin`. If typing `fizz` afterwards says
 "command not found", add that folder to your `PATH`.
 
@@ -131,8 +128,8 @@ That pulls the new code into the folder you cloned, shows what changed,
 rebuilds and reinstalls. `fizz update --check` only looks. Then quit Fizz
 and open it again.
 
-The check goes through your clone of the repository, using the GitHub
-sign-in it already has, so keep that folder where it is. Nothing about you
+The check goes through your clone of the repository, so keep that folder
+where it is. Nothing about you
 or your messages is sent. To turn checking off, set `check = false` under
 `[updates]` in the settings.
 
@@ -382,3 +379,8 @@ patched (OpenCore) Macs, which differ.
 - Inside tmux, pictures show as coloured blocks rather than real pixels.
 - A file the Mac itself never downloaded from iCloud can't be fetched;
   fizz says so when you try.
+
+## Licence
+
+[MIT](LICENSE). Fizz is an independent project, not affiliated with
+BlueBubbles or Apple. iMessage is a trademark of Apple Inc.
