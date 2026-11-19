@@ -150,7 +150,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("↑ ↓  or  j k", "Move between conversations"),
             ("Enter", "Open the conversation and start typing"),
             ("n", "New conversation: type a name, number or email"),
-            ("/", "Search the conversations loaded so far"),
+            ("/", "Search every conversation and contact by name or number"),
             ("g  G", "Jump to the top or bottom"),
             ("r", "Refresh"),
             ("q", "Quit"),
@@ -314,7 +314,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = if let Some(query) = &app.picking {
         format!("To: {query}▏")
     } else if app.filtering || !app.filter.is_empty() {
-        format!("/{}{}", app.filter, if app.filtering { "▏" } else { "" })
+        format!("Search: {}{}", app.filter, if app.filtering { "▏" } else { "" })
     } else {
         "Messages".to_string()
     };
@@ -346,7 +346,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         } else if app.chats_loading {
             "Loading conversations…".into()
         } else if !app.filter.is_empty() {
-            "No matches".into()
+            "No conversation or contact matches".into()
         } else {
             "No conversations".into()
         };
@@ -461,7 +461,12 @@ fn chat_row(app: &App, chat: &Chat, w: usize, cursor: bool, open: bool) -> [Line
 
     let text = match &chat.last_message {
         Some(message) => preview(message),
+        None if chat.is_draft() && chat.touched == 0 => {
+            // A contact found by search, with no conversation yet.
+            format!("{} · contact", app.pretty_address(&chat.chat_identifier))
+        }
         None if chat.is_draft() => "New conversation".to_string(),
+        None if chat.touched == 0 => "Older conversation".to_string(),
         None => String::new(),
     };
     let text = truncate(&text, w.saturating_sub(4));

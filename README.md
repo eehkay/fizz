@@ -170,7 +170,7 @@ The essentials:
 | Chat list    | `↑` `↓` / `j` `k`           | Move                         |
 |              | `Enter`                     | Open and start typing        |
 |              | `n`                         | New conversation             |
-|              | `/`                         | Search loaded conversations  |
+|              | `/`                         | Search every conversation and contact |
 |              | `q`                         | Quit                         |
 | Writing      | `Enter`                     | Send                         |
 |              | `Shift+Enter` or `Ctrl+J`   | New line                     |
@@ -188,6 +188,15 @@ The essentials:
 
 The mouse works too: click a conversation to open it, wheel to scroll, click
 a picture or file to open it, click a message to select it.
+
+## Search
+
+Press `/` in the chat list and type part of a name, a group's name, or a
+phone number. Results cover every conversation on the server, however old,
+and contacts you have never messaged (choosing one of those starts a new
+conversation). Enter opens the highlighted result; Esc cancels.
+
+Search is by who the conversation is with, not by what was said in it.
 
 ## New conversations
 

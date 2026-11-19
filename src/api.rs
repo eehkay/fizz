@@ -108,6 +108,16 @@ impl Api {
         .await
     }
 
+    /// A slice of every chat the server knows, in no useful order. Used to
+    /// make all conversations searchable by name, not only recent ones.
+    pub async fn all_chats(&self, offset: usize, limit: usize) -> Result<Vec<Chat>> {
+        self.post(
+            "/chat/query",
+            json!({ "limit": limit, "offset": offset, "with": ["participants"] }),
+        )
+        .await
+    }
+
     /// One chat with its participants.
     pub async fn chat(&self, guid: &str) -> Result<Chat> {
         self.get(&format!("/chat/{}", encode(guid)), &[("with", "participants")])

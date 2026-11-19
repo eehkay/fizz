@@ -38,6 +38,8 @@ pub enum AppEvent {
         result: Result<Vec<Message>, String>,
     },
     ChatDetail(Chat),
+    /// A slice of the server's full chat list, for searching by name.
+    Index(Vec<Chat>),
     Contacts(Vec<Contact>),
     Messages {
         chat: String,
@@ -172,6 +174,12 @@ pub struct App {
     detail_requested: HashSet<String>,
     pub chats_error: Option<String>,
     contacts: HashMap<String, String>,
+    /// Every chat on the server, loaded quietly at startup so search can
+    /// reach conversations older than the list has scrolled to.
+    index: Vec<Chat>,
+    /// Search results beyond the loaded list: older conversations, and
+    /// contacts you have no conversation with yet (as unsent drafts).
+    search_extra: Vec<Chat>,
     /// Every contact address, as (name, address), for starting new chats.
     people: Vec<(String, String)>,
     /// The "To:" text while choosing who to start a conversation with.
@@ -243,6 +251,8 @@ impl App {
             detail_requested: HashSet::new(),
             chats_error: None,
             contacts: HashMap::new(),
+            index: Vec::new(),
+            search_extra: Vec::new(),
             people: Vec::new(),
             picking: None,
             pick_index: 0,
@@ -330,6 +340,19 @@ impl App {
                 if let Ok(contacts) = api.contacts().await {
                     let _ = tx.send(AppEvent::Contacts(contacts));
                 }
+                // Every chat's name and members, a thousand at a time.
+                const PAGE: usize = 1000;
+                for page in 0..200 {
+                    match api.all_chats(page * PAGE, PAGE).await {
+                        Ok(chats) => {
+                            let last = chats.len() < PAGE;
+                            if tx.send(AppEvent::Index(chats)).is_err() || last {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
             });
         }
     }
@@ -401,11 +424,95 @@ impl App {
 
     /// Chats matching the search box, in display order.
     pub fn visible(&self) -> Vec<&Chat> {
-        let needle = self.filter.to_lowercase();
+        if self.filter.trim().is_empty() {
+            return self.chats.iter().collect();
+        }
         self.chats
             .iter()
-            .filter(|c| needle.is_empty() || self.chat_title(c).to_lowercase().contains(&needle))
+            .filter(|c| self.matches_search(c))
+            .chain(&self.search_extra)
             .collect()
+    }
+
+    /// Whether a chat's name, members or number match the search text.
+    fn matches_search(&self, chat: &Chat) -> bool {
+        let needle = self.filter.trim().to_lowercase();
+        if self.chat_title(chat).to_lowercase().contains(&needle) {
+            return true;
+        }
+        // Members of a named group, and numbers typed in any format.
+        let digits: String = needle.chars().filter(char::is_ascii_digit).collect();
+        let by_number = digits.len() >= 3 && digits.len() + 2 >= needle.len();
+        chat.participants.iter().any(|p| {
+            self.name_for(&p.address).to_lowercase().contains(&needle)
+                || (by_number
+                    && p.address
+                        .chars()
+                        .filter(char::is_ascii_digit)
+                        .collect::<String>()
+                        .contains(&digits))
+        })
+    }
+
+    /// Rebuild the results that come from beyond the loaded list. Called
+    /// whenever the search text changes.
+    fn refresh_search(&mut self) {
+        self.search_extra.clear();
+        let needle = self.filter.trim().to_lowercase();
+        if needle.chars().count() < 2 {
+            return;
+        }
+        let loaded: HashSet<&str> = self.chats.iter().map(|c| c.guid.as_str()).collect();
+        let mut older: Vec<Chat> = self
+            .index
+            .iter()
+            .filter(|c| !loaded.contains(c.guid.as_str()) && self.matches_search(c))
+            .cloned()
+            .collect();
+        // Named groups first, then by name; the server gives no dates here.
+        older.sort_by_cached_key(|c| {
+            let named = c.display_name.as_deref().is_some_and(|n| !n.is_empty());
+            (!named, self.chat_title(c).to_lowercase())
+        });
+        older.truncate(40);
+
+        // Contacts with no conversation among the matches so far.
+        let mut taken: HashSet<String> = self
+            .chats
+            .iter()
+            .filter(|c| self.matches_search(c))
+            .chain(&older)
+            .filter(|c| !c.is_group())
+            .flat_map(|c| {
+                c.participants
+                    .iter()
+                    .map(|p| normalize_address(&p.address))
+                    .chain([normalize_address(&c.chat_identifier)])
+            })
+            .collect();
+        let digits: String = needle.chars().filter(char::is_ascii_digit).collect();
+        let people: Vec<Chat> = self
+            .people
+            .iter()
+            .filter(|(name, address)| {
+                name.to_lowercase().contains(&needle)
+                    || (digits.len() >= 3
+                        && address
+                            .chars()
+                            .filter(char::is_ascii_digit)
+                            .collect::<String>()
+                            .contains(&digits))
+            })
+            .filter(|(_, address)| taken.insert(normalize_address(address)))
+            .take(15)
+            .map(|(_, address)| {
+                let mut draft = Chat::draft(&sendable_address(address));
+                draft.touched = 0;
+                draft
+            })
+            .collect();
+        self.search_extra = older;
+        self.search_extra.extend(people);
     }
 
     pub fn cursor_index(&self) -> usize {
@@ -1040,6 +1147,12 @@ impl App {
 
     pub fn on_event(&mut self, event: AppEvent) {
         match event {
+            AppEvent::Index(chats) => {
+                self.index.extend(chats);
+                if !self.filter.is_empty() {
+                    self.refresh_search();
+                }
+            }
             AppEvent::ChatDetail(detail) => {
                 if let Some(chat) = self.chats.iter_mut().find(|c| c.guid == detail.guid) {
                     chat.participants = detail.participants;
@@ -1120,6 +1233,14 @@ impl App {
                             convo.absorb(message);
                         }
                         convo.settle();
+                        // A chat opened from search has no preview yet.
+                        if let (Some(newest), Some(entry)) = (
+                            convo.messages.last().cloned(),
+                            self.chats.iter_mut().find(|c| c.guid == chat),
+                        ) && entry.last_message.is_none()
+                        {
+                            entry.last_message = Some(newest);
+                        }
                     }
                     Err(e) => convo.error = Some(e),
                 }
@@ -1362,10 +1483,23 @@ impl App {
     }
 
     fn open_cursor(&mut self) {
-        if let Some(guid) = self.cursor.clone() {
-            self.open_chat(&guid);
-            self.focus = Focus::Compose;
+        let Some(guid) = self.cursor.clone() else { return };
+        // A search result from beyond the loaded list.
+        if let Some(found) = self.search_extra.iter().find(|c| c.guid == guid).cloned() {
+            self.search_extra.clear();
+            if let Some(address) = found.guid.strip_prefix("new:") {
+                // A contact: opens their conversation if one exists.
+                return self.start_chat(address);
+            }
+            if !self.chats.iter().any(|c| c.guid == guid) {
+                let mut chat = found;
+                chat.touched = chrono::Utc::now().timestamp_millis();
+                self.chats.push(chat);
+                self.sort_chats();
+            }
         }
+        self.open_chat(&guid);
+        self.focus = Focus::Compose;
     }
 
     fn on_key(&mut self, key: KeyEvent) {
@@ -1559,20 +1693,25 @@ impl App {
             KeyCode::Esc => {
                 self.filtering = false;
                 self.filter.clear();
+                self.refresh_search();
             }
             KeyCode::Enter => {
                 self.filtering = false;
+                // Opening may move a result into the list; clear after.
                 self.open_cursor();
                 self.filter.clear();
+                self.refresh_search();
             }
             KeyCode::Down => self.move_cursor(1),
             KeyCode::Up => self.move_cursor(-1),
             KeyCode::Backspace => {
                 self.filter.pop();
+                self.refresh_search();
                 self.cursor_to_edge(false);
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.filter.push(c);
+                self.refresh_search();
                 self.cursor_to_edge(false);
             }
             _ => {}
