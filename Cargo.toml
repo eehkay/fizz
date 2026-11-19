@@ -8,6 +8,7 @@ repository = "https://github.com/eehkay/fizz"
 readme = "README.md"
 
 [dependencies]
+aho-corasick = "1.1.5"
 anyhow = "1.0.104"
 base64 = "0.23.1"
 chrono = "0.4.45"

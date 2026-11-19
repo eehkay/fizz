@@ -175,6 +175,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.stats {
         draw_stats(frame, app, main);
     }
+    if app.filtering {
+        draw_search(frame, app, main);
+    }
     if let Some(guid) = app.deleting.clone() {
         let name = app
             .chats
@@ -221,6 +224,256 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(block, popup);
         frame.render_widget(Paragraph::new(lines), inner);
     }
+}
+
+// ----- search layer ----------------------------------------------------
+
+/// A line of a message around the first thing that matched, with every
+/// match picked out.
+fn snippet(text: &str, words: &[String], room: usize, theme: &Theme) -> Line<'static> {
+    let chars: Vec<char> = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let lower: Vec<char> = chars
+        .iter()
+        .map(|c| c.to_lowercase().next().unwrap_or(*c))
+        .collect();
+    // Mark which characters are part of a match.
+    let mut marked = vec![false; chars.len()];
+    let mut first = None;
+    for word in words {
+        let w: Vec<char> = word.chars().collect();
+        if w.is_empty() || w.len() > lower.len() {
+            continue;
+        }
+        for at in 0..=lower.len() - w.len() {
+            if lower[at..at + w.len()] == w[..] {
+                marked[at..at + w.len()].fill(true);
+                first = Some(first.map_or(at, |f: usize| f.min(at)));
+            }
+        }
+    }
+    // Start a little before the first match so it has some context.
+    let start = first.map_or(0, |f| f.saturating_sub(room / 4));
+    let mut spans = Vec::new();
+    let mut used = 0;
+    if start > 0 {
+        spans.push(Span::styled("…", Style::new().fg(theme.muted)));
+        used += 1;
+    }
+    let plain = Style::new().fg(theme.text);
+    let hit = Style::new().fg(theme.accent).add_modifier(Modifier::BOLD);
+    let mut run = String::new();
+    let mut run_marked = false;
+    for i in start..chars.len() {
+        let w = unicode_width::UnicodeWidthChar::width(chars[i]).unwrap_or(0);
+        if used + w + 1 > room {
+            run.push('…');
+            break;
+        }
+        if marked[i] != run_marked && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), if run_marked { hit } else { plain }));
+        }
+        run_marked = marked[i];
+        run.push(chars[i]);
+        used += w;
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if run_marked { hit } else { plain }));
+    }
+    Line::from(spans)
+}
+
+fn draw_search(frame: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme.clone();
+    let w = area.width.saturating_sub(6).clamp(30, 108).min(area.width);
+    let h = area.height.saturating_sub(2).clamp(8, 44).min(area.height);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w,
+        h,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .title(Span::styled(
+            " Search ",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup).inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(block, popup);
+    if inner.height < 5 || inner.width < 20 {
+        return;
+    }
+    let width_cells = usize::from(inner.width);
+    let [box_row, _, list, _, foot] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+
+    // The search box.
+    let query = app.filter.clone();
+    let typed = if query.is_empty() {
+        Line::from(vec![
+            Span::styled("› ▏", Style::new().fg(theme.accent)),
+            Span::styled(
+                "a name, a number, or words from a message",
+                Style::new().fg(theme.muted),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("› ", Style::new().fg(theme.accent)),
+            Span::styled(
+                truncate(&query, width_cells.saturating_sub(4)),
+                Style::new().fg(theme.bright).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("▏", Style::new().fg(theme.accent)),
+        ])
+    };
+    frame.render_widget(typed, box_row);
+
+    // Results, as blocks of lines; `Some(n)` marks the nth selectable row.
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let chosen = app.search_index;
+    let header = |text: String| {
+        Line::styled(text, Style::new().fg(theme.muted).add_modifier(Modifier::BOLD))
+    };
+    let bar = |on: bool| {
+        Span::styled(if on { "▌ " } else { "  " }, Style::new().fg(theme.accent))
+    };
+    let mut blocks: Vec<(Option<usize>, Vec<Line>)> = Vec::new();
+    let mut row = 0;
+
+    let conversations = app.conversation_hits();
+    if !conversations.is_empty() {
+        blocks.push((None, vec![header("Conversations".into())]));
+    }
+    for chat in &conversations {
+        let on = row == chosen;
+        let note = match &chat.last_message {
+            Some(m) => list_stamp(m.date_created),
+            None if chat.is_draft() => "contact".to_string(),
+            None => "older".to_string(),
+        };
+        let title = truncate(&app.chat_title(chat), width_cells.saturating_sub(width(&note) + 6));
+        let gap = width_cells.saturating_sub(2 + width(&title) + width(&note));
+        let style = if on {
+            Style::new().fg(theme.bright).bg(theme.surface).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.text)
+        };
+        blocks.push((
+            Some(row),
+            vec![Line::from(vec![
+                bar(on),
+                Span::styled(format!("{title}{}", pad(gap)), style),
+                Span::styled(note, style.fg(theme.muted)),
+            ])],
+        ));
+        row += 1;
+    }
+
+    if !app.found.is_empty() {
+        if !blocks.is_empty() {
+            blocks.push((None, vec![Line::default()]));
+        }
+        let count = app.found.len();
+        blocks.push((
+            None,
+            vec![header(format!(
+                "Messages · {}",
+                if count >= 80 { "80 newest".to_string() } else { count.to_string() }
+            ))],
+        ));
+    }
+    for hit in &app.found {
+        let on = row == chosen;
+        let who = if hit.from_me {
+            "You".to_string()
+        } else if hit.sender.is_empty() {
+            "Them".to_string()
+        } else {
+            app.short_name_for(&hit.sender)
+        };
+        let when = list_stamp(hit.date);
+        let title = truncate(
+            &format!("{} · {who}", app.title_for(&hit.chat)),
+            width_cells.saturating_sub(width(&when) + 6),
+        );
+        let gap = width_cells.saturating_sub(2 + width(&title) + width(&when));
+        let base = if on { Style::new().bg(theme.surface) } else { Style::new() };
+        let mut body = snippet(&hit.text, &words, width_cells.saturating_sub(4), &theme);
+        body.spans.insert(0, bar(on));
+        if on {
+            body = body.style(Style::new().bg(theme.surface));
+        }
+        blocks.push((
+            Some(row),
+            vec![
+                Line::from(vec![
+                    bar(on),
+                    Span::styled(
+                        format!("{title}{}", pad(gap)),
+                        base.fg(if on { theme.bright } else { theme.muted }),
+                    ),
+                    Span::styled(when, base.fg(theme.muted)),
+                ]),
+                body,
+            ],
+        ));
+        row += 1;
+    }
+
+    if blocks.is_empty() {
+        let note = if query.trim().is_empty() {
+            "Results appear as you type."
+        } else {
+            "Nothing found."
+        };
+        blocks.push((None, vec![Line::styled(note, Style::new().fg(theme.muted))]));
+    }
+
+    // Keep the highlighted block in view.
+    let visible_rows = usize::from(list.height);
+    let mut line_no = 0;
+    let mut chosen_end = 0;
+    let mut lines: Vec<Line> = Vec::new();
+    for (tag, block_lines) in blocks {
+        line_no += block_lines.len();
+        if tag == Some(chosen) {
+            chosen_end = line_no;
+        }
+        lines.extend(block_lines);
+    }
+    let top = chosen_end.saturating_sub(visible_rows);
+    let shown: Vec<Line> = lines.into_iter().skip(top).take(visible_rows).collect();
+    frame.render_widget(Paragraph::new(shown), list);
+
+    // What the message-text search can and cannot see right now.
+    let status = match (&app.indexing, crate::index::enabled()) {
+        (_, false) => "Only names are searched. Ctrl+B also searches message text, by keeping a copy of it on this computer.".to_string(),
+        (Some(p), true) if p.complete => format!("Message text: all {} messages are searchable.", p.stored),
+        (Some(p), true) => match p.percent() {
+            Some(percent) => format!(
+                "Message text: {percent}% downloaded, back to {}. Older messages are still arriving.",
+                local(p.oldest).format("%b %Y")
+            ),
+            None => "Message text: starting the download…".to_string(),
+        },
+        (None, true) => "Message text: starting the download…".to_string(),
+    };
+    frame.render_widget(
+        Line::styled(truncate(&status, width_cells), Style::new().fg(theme.muted)),
+        foot,
+    );
 }
 
 // ----- stats screen ----------------------------------------------------
@@ -411,10 +664,25 @@ fn draw_stats(frame: &mut Frame, app: &mut App, area: Rect) {
         row("Contacts", format!("{contacts} addresses")),
         row("Open chat", format!("{open_messages} messages loaded")),
     ];
-    if let Some((thumbs, files)) = app.cache_sizes {
+    if let Some((thumbs, files, index)) = app.cache_sizes {
         data.push(row(
-            "Cache on disk",
-            format!("pictures {} · files {}", file_size(thumbs), file_size(files)),
+            "On disk",
+            format!(
+                "pictures {} · files {} · search {}",
+                file_size(thumbs),
+                file_size(files),
+                file_size(index)
+            ),
+        ));
+    }
+    if let Some(p) = &app.indexing {
+        data.push(row(
+            "Search index",
+            match (p.complete, p.percent()) {
+                (true, _) => format!("{} messages, complete", p.stored),
+                (false, Some(n)) => format!("{} messages, {n}% downloaded", p.stored),
+                (false, None) => "starting".to_string(),
+            },
         ));
     }
 
@@ -611,7 +879,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Enter", "Open the conversation and start typing"),
             ("n", "New conversation: type a name, number or email"),
             ("D", "Delete the conversation everywhere (capital D; asks first)"),
-            ("/", "Search every conversation and contact by name or number"),
+            ("/", "Search: conversations and contacts by name or number, and messages by their words"),
             ("G", "New group: type a name, Enter adds them; then Enter on \"Start the group\""),
             ("Home  End", "Jump to the top or bottom"),
             ("r", "Refresh"),
@@ -789,8 +1057,6 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             .collect();
         let label = if app.pick_group { "New group" } else { "To" };
         format!("{label}: {added}{query}▏")
-    } else if app.filtering || !app.filter.is_empty() {
-        format!("Search: {}{}", app.filter, if app.filtering { "▏" } else { "" })
     } else {
         "Messages".to_string()
     };
@@ -821,8 +1087,6 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             format!("{error}\n\nPress r to try again.")
         } else if app.chats_loading {
             "Loading conversations…".into()
-        } else if !app.filter.is_empty() {
-            "No conversation or contact matches".into()
         } else {
             "No conversations".into()
         };
@@ -1311,8 +1575,14 @@ fn draw_timeline(frame: &mut Frame, app: &mut App, chat: &Chat, view: Rect) {
         }
         scroll = scroll.min(max_scroll);
     }
+    // Newer history just arrived below: stay on the same messages.
+    if convo.grew_below {
+        scroll = (scroll + total.saturating_sub(convo.last_total)).min(max_scroll);
+    }
     let near_top = max_scroll - scroll < 4;
     let wants_older = near_top && !convo.exhausted && !convo.loading;
+    let detached = convo.detached;
+    let wants_newer = detached && scroll < 4;
 
     // Row of the first item relative to the top of the view; negative when
     // it starts above. Short conversations sit at the bottom.
@@ -1382,9 +1652,13 @@ fn draw_timeline(frame: &mut Frame, app: &mut App, chat: &Chat, view: Rect) {
     app.hits = hits;
     app.reveal = false;
 
-    if scroll > 0 {
+    if scroll > 0 || detached {
         let label = Span::styled(
-            format!(" ↓ {scroll} more "),
+            if detached {
+                " ↓ newer messages · End for the latest ".to_string()
+            } else {
+                format!(" ↓ {scroll} more ")
+            },
             Style::new().fg(theme.on_accent).bg(theme.accent),
         );
         let w = label.width() as u16;
@@ -1399,8 +1673,11 @@ fn draw_timeline(frame: &mut Frame, app: &mut App, chat: &Chat, view: Rect) {
 
     if let Some(convo) = app.convos.get_mut(&chat.guid) {
         convo.scroll = scroll;
+        convo.last_total = total;
+        convo.grew_below = false;
     }
     app.wants_older = wants_older;
+    app.wants_newer = wants_newer;
 }
 
 /// Turn a conversation into rows for a view `w` cells wide.
@@ -1708,8 +1985,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         &[("esc", "close stats")]
     } else if app.help {
         &[("esc", "close help")]
+    } else if app.filtering && !crate::index::enabled() {
+        &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("^B", "search message text too"), ("esc", "close")]
     } else if app.filtering {
-        &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("esc", "cancel")]
+        &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("^U", "clear"), ("esc", "close")]
     } else if app.deleting.is_some() {
         &[("D", "delete for good"), ("any other key", "cancel")]
     } else if app.unsending.is_some() {

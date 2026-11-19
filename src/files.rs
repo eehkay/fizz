@@ -531,8 +531,31 @@ pub fn read_clipboard() -> Result<Clipboard> {
     Ok(Clipboard::Empty)
 }
 
+/// Picture thumbnails are tiny, but there is one for every picture ever
+/// scrolled past. Drop those not needed for three months; they are fetched
+/// again if that conversation is opened.
+fn prune_thumbnails() {
+    const KEEP: Duration = Duration::from_secs(90 * 24 * 3600);
+    let Ok(entries) = std::fs::read_dir(cache_dir().join("thumbs")) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > KEEP);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Drop downloads that have not been touched for a while.
 pub fn prune() {
+    prune_thumbnails();
     let now = SystemTime::now();
     let entries = [files_dir(), cache_dir().join("outbox")]
         .into_iter()

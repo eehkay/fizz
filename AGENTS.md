@@ -59,6 +59,10 @@ must stay where it is; if it has moved, clone again and reinstall.
   `fizz --snapshot 120x36` to print one frame as plain text (useful,
   since you cannot drive a full-screen terminal app directly). Do not
   capture or print the user's real conversations.
+- **The search index is the user's messages.** `~/.local/share/fizz/index`
+  holds the text of their messages once they turn word search on. Do not
+  read, print or copy it. `fizz index` and `fizz index count <words>`
+  report sizes and counts without showing any text.
 - **Do not turn off System Integrity Protection** or change BlueBubbles
   Server settings on the Mac unless the user asks; the README explains
   what that costs.
@@ -80,6 +84,8 @@ must stay where it is; if it has moved, clone again and reinstall.
     opening, saving, attaching, clipboard, notifications
   - `config.rs`: server details and the settings file
   - `theme.rs`: colours, including following the Omarchy theme
+  - `index.rs`: the local copy of message text and searching it
+  - `metrics.rs`: timings and usage for the stats screen
   - `update.rs`: checking the repository for a newer commit, the banner's
     source, and `fizz update`
   - `model.rs`: the server's data shapes

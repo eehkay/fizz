@@ -10,7 +10,7 @@ It runs in any terminal; see [which ones show pictures](#which-terminals-show-pi
 - Photos shown inline as real pixels, and a still frame for videos
 - Start new conversations, send text, files and pictures, insert emoji
 - Open or save any attachment, copy message text, open links
-- Search every conversation and contact by name or number
+- Search every conversation and contact by name, and messages by their words
 - New messages arrive live, with desktop notifications
 - Follows the current [Omarchy](https://omarchy.org) theme and re-colours
   itself when you switch; uses your terminal's colours everywhere else
@@ -158,6 +158,7 @@ fizz setup     # enter or change the server address and password
 fizz check     # test the connection without opening the app
 fizz config    # open the settings file in your $EDITOR
 fizz update    # install the newest version (--check only looks)
+fizz index     # what the message-text search index holds ("fizz index delete" removes it)
 fizz --demo    # made-up conversations, no server needed
 fizz --help    # this list, and the environment variables
 ```
@@ -172,6 +173,7 @@ fizz config     # opens the settings file in your $EDITOR
 its default written out, each with a comment. It covers:
 
 - **Updates:** whether to check for new versions, and how often
+- **Search:** how many years of message text to keep for word search
 - **Notifications:** on or off, whether they show the message text, and an
   optional sound
 - **Appearance:** theme (`auto`, `terminal`, or a `colors.toml` path), 12 or
@@ -209,7 +211,7 @@ The essentials:
 |              | `n`                         | New conversation             |
 |              | `G`                         | New group conversation (capital G) |
 |              | `D`                         | Delete the conversation everywhere (capital D; asks first) |
-|              | `/`                         | Search every conversation and contact |
+|              | `/`                         | Search conversations, contacts and message text |
 |              | `q`                         | Quit                         |
 | Writing      | `Enter`                     | Send                         |
 |              | `Shift+Enter` or `Ctrl+J`   | New line                     |
@@ -236,12 +238,37 @@ a picture or file to open it, click a message to select it.
 
 ## Search
 
-Press `/` in the chat list and type part of a name, a group's name, or a
-phone number. Results cover every conversation on the server, however old,
-and contacts you have never messaged (choosing one of those starts a new
-conversation). Enter opens the highlighted result; Esc cancels.
+Press `/` in the chat list. A search layer opens over the app with one box
+and two kinds of result:
 
-Search is by who the conversation is with, not by what was said in it.
+- **Conversations:** every conversation on the server, however old, by
+  name, group name, member or phone number, plus contacts you have never
+  messaged (choosing one starts a new conversation).
+- **Messages:** messages containing the words you typed, newest first, with
+  the words highlighted. Several words must all appear. Enter opens the
+  conversation at that message, with the history around it; `End` returns
+  to the latest messages.
+
+Up and Down move, Enter opens, Esc closes. Pressing `/` again brings back
+your last search; `Ctrl+U` clears it.
+
+### Searching message text
+
+The server cannot search by words itself, so this part works from a copy of
+your message text kept on this computer. It is off until you press `Ctrl+B`
+in the search layer.
+
+- **What it stores:** the text of each message, who sent it and when, in
+  `~/.local/share/fizz/index`, readable only by you. No pictures or files.
+- **How big:** roughly 15 MB for every 100,000 messages.
+- **How long:** it downloads in the background, newest first, a few hundred
+  messages at a time so the app stays responsive. Half a million messages
+  takes around half an hour, and you can search what has arrived so far.
+  After that it only adds new messages.
+- **Limiting it:** set `years` under `[search]` in the settings to keep only
+  that many years.
+- **Checking or removing it:** `fizz index` shows what it holds;
+  `fizz index delete` removes it and turns it off.
 
 ## New conversations
 
@@ -376,9 +403,8 @@ What Fizz uses it for today:
   since creating chats is one of the things the helper is for. If a new
   conversation fails to start, this is the likely reason.
 
-Searching message text is the one thing still missing: the server's own
-text search does not return on the versions tried, so it would need a local
-index.
+Searching message text does not go through the helper: see
+[Searching message text](#searching-message-text).
 
 ### Setting it up
 

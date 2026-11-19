@@ -33,6 +33,10 @@ use crate::theme::Theme;
 /// in place of an address.
 pub const START_GROUP: &str = "\u{1}start-group";
 
+/// How many results of each kind the search layer shows.
+const SEARCH_CONVERSATIONS: usize = 8;
+const SEARCH_MESSAGES: usize = 80;
+
 /// How many of the newest messages to scan per step when building the list.
 const SCAN_PAGE: usize = 400;
 const MESSAGE_PAGE: usize = 50;
@@ -44,6 +48,13 @@ pub enum AppEvent {
         result: Result<Vec<Message>, String>,
     },
     ChatDetail(Chat),
+    /// How far the local copy of message text has got.
+    Indexing(crate::index::Progress),
+    /// Messages found for a search; `generation` says which search.
+    Found {
+        generation: u64,
+        hits: Vec<crate::index::Hit>,
+    },
     /// What the server says about itself, including whether its Private
     /// API helper is connected.
     Info(ServerInfo),
@@ -77,6 +88,7 @@ pub enum AppEvent {
     Contacts(Vec<Contact>),
     Messages {
         chat: String,
+        page: Page,
         result: Result<Vec<Message>, String>,
     },
     Incoming(Vec<Message>),
@@ -114,6 +126,18 @@ pub enum AppEvent {
     },
 }
 
+/// Which stretch of a conversation's history a fetch brought back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Page {
+    /// Older than anything loaded (or the first, most recent page).
+    Older,
+    /// Newer than anything loaded, when the view is not at the present.
+    Newer,
+    /// Both sides of one message, after jumping to it from search.
+    /// `more_newer` says whether there is more history after this window.
+    Around { more_newer: bool },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     List,
@@ -130,10 +154,17 @@ pub struct Convo {
     reaction_events: Vec<Message>,
     /// Target message guid -> (who, glyph).
     pub reactions: HashMap<String, Vec<(String, String)>>,
-    /// How many server rows have been fetched, for paging.
-    fetched: usize,
     pub exhausted: bool,
     pub loading: bool,
+    /// True after jumping to an old message: what is loaded stops short of
+    /// the present, so newer history loads on the way down and live
+    /// messages are held back until the view returns to the latest.
+    pub detached: bool,
+    loading_newer: bool,
+    /// Set when newer history was added below, so the next draw keeps the
+    /// same messages in view instead of sliding down with the new rows.
+    pub grew_below: bool,
+    pub last_total: usize,
     pub loaded: bool,
     pub error: Option<String>,
     /// Rows scrolled up from the newest message.
@@ -211,6 +242,16 @@ pub struct App {
     /// Every chat on the server, loaded quietly at startup so search can
     /// reach conversations older than the list has scrolled to.
     index: Vec<Chat>,
+    /// The row highlighted in the search layer, counting conversations
+    /// first and then messages.
+    pub search_index: usize,
+    /// Messages found by their text.
+    pub found: Vec<crate::index::Hit>,
+    search_generation: u64,
+    /// The local copy of message text: how far it has got, and where
+    /// newly arrived messages are handed to it.
+    pub indexing: Option<crate::index::Progress>,
+    index_tx: Option<UnboundedSender<Message>>,
     /// Search results beyond the loaded list: older conversations, and
     /// contacts you have no conversation with yet (as unsent drafts).
     search_extra: Vec<Chat>,
@@ -252,8 +293,9 @@ pub struct App {
     pub usage: Usage,
     usage_at: Option<(Duration, Instant)>,
     pub cpu_percent: Option<f32>,
-    /// Bytes in the picture cache and the downloaded-files cache.
-    pub cache_sizes: Option<(u64, u64)>,
+    /// Bytes in the picture cache, the downloaded-files cache, and the
+    /// search index.
+    pub cache_sizes: Option<(u64, u64, u64)>,
     /// A newer version's commit, when one has been pushed.
     pub update: Option<String>,
     /// The message being replied to: its id, which part, and a short
@@ -315,6 +357,12 @@ pub struct App {
     pub convo_rect: Rect,
     pub view_rows: usize,
     pub wants_older: bool,
+    pub wants_newer: bool,
+    /// The message to highlight once a jump's history has arrived.
+    jump_target: Option<String>,
+    /// After a jump: keep the highlighted message in view as the layout
+    /// settles, until the user scrolls or moves the selection.
+    pinned: bool,
     temp_counter: u64,
 }
 
@@ -333,6 +381,11 @@ impl App {
             detail_requested: HashSet::new(),
             chats_error: None,
             contacts: HashMap::new(),
+            search_index: 0,
+            found: Vec::new(),
+            search_generation: 0,
+            indexing: None,
+            index_tx: None,
             index: Vec::new(),
             search_extra: Vec::new(),
             people: Vec::new(),
@@ -400,6 +453,9 @@ impl App {
             convo_rect: Rect::default(),
             view_rows: 20,
             wants_older: false,
+            wants_newer: false,
+            jump_target: None,
+            pinned: false,
             temp_counter: 0,
         }
     }
@@ -436,6 +492,10 @@ impl App {
     }
 
     pub fn start(&mut self) {
+        if crate::index::enabled() {
+            self.indexing = Some(crate::index::Progress::load());
+            self.start_index();
+        }
         if let Ok(bytes) = std::fs::read(Self::seen_path()) {
             self.seen = serde_json::from_slice(&bytes).unwrap_or_default();
         }
@@ -590,14 +650,132 @@ impl App {
 
     /// Chats matching the search box, in display order.
     pub fn visible(&self) -> Vec<&Chat> {
+        self.chats.iter().collect()
+    }
+
+    // ----- the search layer ------------------------------------------------
+
+    /// Conversations and contacts matching the search text: loaded ones
+    /// first, then older ones and contacts from beyond the list.
+    pub fn conversation_hits(&self) -> Vec<&Chat> {
         if self.filter.trim().is_empty() {
-            return self.chats.iter().collect();
+            return Vec::new();
         }
         self.chats
             .iter()
             .filter(|c| self.matches_search(c))
             .chain(&self.search_extra)
+            .take(SEARCH_CONVERSATIONS)
             .collect()
+    }
+
+    /// How many rows the search layer has to move through.
+    pub fn search_rows(&self) -> usize {
+        self.conversation_hits().len() + self.found.len()
+    }
+
+    /// A conversation's name from its id, wherever we know it from.
+    pub fn title_for(&self, guid: &str) -> String {
+        self.chats
+            .iter()
+            .chain(&self.index)
+            .find(|c| c.guid == guid)
+            .map_or_else(|| "Conversation".to_string(), |c| self.chat_title(c))
+    }
+
+    /// The search text changed: redo both kinds of result.
+    fn search_changed(&mut self) {
+        self.refresh_search();
+        self.search_index = 0;
+        self.search_generation += 1;
+        let query = self.filter.trim().to_string();
+        if query.chars().count() < 2 || !crate::index::enabled() {
+            self.found.clear();
+            return;
+        }
+        let (generation, tx) = (self.search_generation, self.tx.clone());
+        tokio::task::spawn_blocking(move || {
+            let hits = crate::index::search(&query, SEARCH_MESSAGES).unwrap_or_default();
+            let _ = tx.send(AppEvent::Found { generation, hits });
+        });
+    }
+
+    /// Open whatever the search layer has highlighted.
+    fn open_search_result(&mut self) {
+        let conversations: Vec<Chat> = self.conversation_hits().into_iter().cloned().collect();
+        self.filtering = false;
+        if let Some(found) = conversations.get(self.search_index) {
+            let guid = found.guid.clone();
+            if let Some(address) = guid.strip_prefix("new:") {
+                // A contact: opens their conversation if there is one.
+                return self.start_chat(address);
+            }
+            self.adopt_chat(found.clone());
+            self.cursor = Some(guid);
+            return self.open_cursor();
+        }
+        let Some(hit) = self
+            .found
+            .get(self.search_index - conversations.len().min(self.search_index))
+            .cloned()
+        else {
+            return;
+        };
+        // A message: make sure its conversation is in the list, then open
+        // the conversation at that point in its history.
+        let known = self
+            .chats
+            .iter()
+            .chain(&self.index)
+            .find(|c| c.guid == hit.chat)
+            .cloned()
+            .unwrap_or_else(|| Chat {
+                guid: hit.chat.clone(),
+                chat_identifier: hit.sender.clone(),
+                ..Chat::default()
+            });
+        self.adopt_chat(known);
+        self.cursor = Some(hit.chat.clone());
+        self.open_at(&hit.chat, &hit.guid, hit.date);
+    }
+
+    /// Put a conversation found by search into the list, if it is not there.
+    fn adopt_chat(&mut self, mut chat: Chat) {
+        if !self.chats.iter().any(|c| c.guid == chat.guid) {
+            chat.touched = chrono::Utc::now().timestamp_millis();
+            self.chats.push(chat);
+            self.sort_chats();
+        }
+    }
+
+    /// Start keeping message text on this computer, and keep it current.
+    fn start_index(&mut self) {
+        let Some(api) = self.api.clone() else { return };
+        if self.index_tx.is_some() {
+            return;
+        }
+        let (live_tx, live_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.index_tx = Some(live_tx);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::index::run(api, tx, live_rx, None).await {
+                crate::config::log(&format!("search index stopped: {e:#}"));
+            }
+        });
+    }
+
+    /// Ctrl+B in the search layer: the user agrees to the local copy.
+    fn enable_index(&mut self) {
+        if self.api.is_none() {
+            return self.set_status("The demo has no messages to index".into());
+        }
+        match crate::index::enable() {
+            Ok(()) => {
+                self.start_index();
+                self.set_status("Downloading message text in the background…".into());
+            }
+            Err(e) => self.set_status(format!("Couldn't start: {e:#}")),
+        }
     }
 
     /// Whether a chat's name, members or number match the search text.
@@ -768,6 +946,10 @@ impl App {
         }
         self.mark_seen(guid);
         let convo = self.convos.entry(guid.to_string()).or_default();
+        if convo.detached && !convo.loading {
+            // Left over from an earlier jump into the past: start afresh.
+            *convo = Convo::default();
+        }
         convo.scroll = 0;
         if !convo.loaded && !convo.loading {
             self.fetch_messages(guid);
@@ -783,14 +965,100 @@ impl App {
         }
         convo.loading = true;
         convo.error = None;
-        let (offset, chat, tx) = (convo.fetched, guid.to_string(), self.tx.clone());
+        // One past the oldest we hold, so nothing sharing its timestamp is
+        // skipped; anything fetched twice is simply recognised.
+        let before = convo.messages.first().map(|m| m.date_created + 1);
+        let (chat, tx) = (guid.to_string(), self.tx.clone());
         tokio::spawn(async move {
             let result = api
-                .messages(&chat, offset, MESSAGE_PAGE)
+                .messages(&chat, before, None, MESSAGE_PAGE)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::Messages { chat, result });
+            let _ = tx.send(AppEvent::Messages {
+                chat,
+                page: Page::Older,
+                result,
+            });
         });
+    }
+
+    /// When the view is away from the present: fetch the next newer page.
+    fn fetch_newer(&mut self, guid: &str) {
+        let Some(api) = self.api.clone() else { return };
+        let Some(convo) = self.convos.get_mut(guid) else {
+            return;
+        };
+        if !convo.detached || convo.loading_newer {
+            return;
+        }
+        let Some(after) = convo.messages.last().map(|m| m.date_created - 1) else {
+            return;
+        };
+        convo.loading_newer = true;
+        let (chat, tx) = (guid.to_string(), self.tx.clone());
+        tokio::spawn(async move {
+            let result = api
+                .messages(&chat, None, Some(after), MESSAGE_PAGE)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::Messages {
+                chat,
+                page: Page::Newer,
+                result,
+            });
+        });
+    }
+
+    /// Open a conversation at one message from its past, loading the
+    /// history on both sides of it.
+    pub fn open_at(&mut self, chat: &str, message: &str, date: i64) {
+        // Mark it loading first, so opening does not also fetch the latest.
+        self.convos.insert(
+            chat.to_string(),
+            Convo {
+                loading: true,
+                ..Convo::default()
+            },
+        );
+        self.open_chat(chat);
+        if let Some(convo) = self.convos.get_mut(chat) {
+            convo.detached = true;
+        }
+        self.jump_target = Some(message.to_string());
+        let Some(api) = self.api.clone() else { return };
+        let (chat, tx) = (chat.to_string(), self.tx.clone());
+        tokio::spawn(async move {
+            const SIDE: usize = 30;
+            let older = api.messages(&chat, Some(date + 1), None, SIDE);
+            let newer = api.messages(&chat, None, Some(date), SIDE);
+            let result = match tokio::join!(older, newer) {
+                (Ok(mut older), Ok(newer)) => {
+                    let more_newer = newer.len() >= SIDE;
+                    older.extend(newer);
+                    Ok((older, more_newer))
+                }
+                (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+            };
+            let (page, result) = match result {
+                Ok((messages, more_newer)) => (Page::Around { more_newer }, Ok(messages)),
+                Err(e) => (Page::Around { more_newer: false }, Err(e)),
+            };
+            let _ = tx.send(AppEvent::Messages { chat, page, result });
+        });
+    }
+
+    /// Back to the newest messages: scroll down, or reload the present if
+    /// the view had jumped into the past.
+    fn jump_to_latest(&mut self) {
+        let Some(guid) = self.open.clone() else { return };
+        let detached = self.convos.get(&guid).is_some_and(|c| c.detached);
+        if detached {
+            self.convos.insert(guid.clone(), Convo::default());
+            self.selected = None;
+            self.fetch_messages(&guid);
+        } else if let Some(convo) = self.convos.get_mut(&guid) {
+            convo.scroll = 0;
+        }
     }
 
     /// Called after each draw: fetch older history once the top is in view.
@@ -799,6 +1067,11 @@ impl App {
             && let Some(guid) = self.open.clone()
         {
             self.fetch_messages(&guid);
+        }
+        if std::mem::take(&mut self.wants_newer)
+            && let Some(guid) = self.open.clone()
+        {
+            self.fetch_newer(&guid);
         }
     }
 
@@ -1333,6 +1606,7 @@ impl App {
         let index = (current as isize + delta).clamp(0, all.len() as isize - 1) as usize;
         self.selected = Some(all[index].clone());
         self.reveal = true;
+        self.pinned = false;
     }
 
     /// Open or save an attachment, downloading it first if needed.
@@ -1569,6 +1843,7 @@ impl App {
     }
 
     fn scroll_by(&mut self, rows: isize) {
+        self.pinned = false;
         if let Some(convo) = self.open.as_ref().and_then(|g| self.convos.get_mut(g)) {
             convo.scroll = convo.scroll.saturating_add_signed(rows);
         }
@@ -1641,6 +1916,11 @@ impl App {
         let text = self.input.text().trim().to_string();
         if let Some(address) = chat.strip_prefix("new:") {
             return self.send_first(&chat, address, text);
+        }
+        if self.convos.get(&chat).is_some_and(|c| c.detached) {
+            // What is sent belongs at the end of the conversation, so go
+            // back there before adding it.
+            self.jump_to_latest();
         }
         let mut queue: Vec<Outgoing> = std::mem::take(&mut self.pending_files)
             .into_iter()
@@ -1965,17 +2245,31 @@ impl App {
                 }
                 self.people.sort_by_key(|(name, _)| name.to_lowercase());
             }
-            AppEvent::Messages { chat, result } => {
+            AppEvent::Messages { chat, page, result } => {
                 let convo = self.convos.entry(chat.clone()).or_default();
-                convo.loading = false;
+                match page {
+                    Page::Newer => convo.loading_newer = false,
+                    _ => convo.loading = false,
+                }
                 match result {
-                    Ok(page) => {
+                    Ok(messages) => {
                         convo.loaded = true;
-                        convo.fetched += page.len();
-                        if page.len() < MESSAGE_PAGE {
-                            convo.exhausted = true;
+                        match page {
+                            Page::Older => {
+                                if messages.len() < MESSAGE_PAGE {
+                                    convo.exhausted = true;
+                                }
+                            }
+                            Page::Newer => {
+                                // Caught up with the present.
+                                if messages.len() < MESSAGE_PAGE {
+                                    convo.detached = false;
+                                }
+                                convo.grew_below = true;
+                            }
+                            Page::Around { more_newer } => convo.detached = more_newer,
                         }
-                        for message in page {
+                        for message in messages {
                             convo.absorb(message);
                         }
                         convo.settle();
@@ -1992,10 +2286,45 @@ impl App {
                 }
                 if self.open.as_deref() == Some(chat.as_str()) {
                     self.request_images();
+                    // Arrived from a jump: highlight the message we came for.
+                    if matches!(page, Page::Around { .. })
+                        && let Some(target) = self.jump_target.take()
+                    {
+                        let key = self.convos.get(&chat).and_then(|c| {
+                            let m = c.messages.iter().find(|m| m.guid == target)?;
+                            if m.body().is_empty() {
+                                m.attachments
+                                    .iter()
+                                    .find(|a| !a.is_plugin_payload())
+                                    .map(|a| a.guid.clone())
+                            } else {
+                                Some(format!("text:{}", m.guid))
+                            }
+                        });
+                        if key.is_some() {
+                            self.selected = key;
+                            self.focus = Focus::Browse;
+                            self.reveal = true;
+                            // Pictures around it are still arriving and
+                            // will shift things; hold it in view meanwhile.
+                            self.pinned = true;
+                        }
+                    }
+                }
+            }
+            AppEvent::Indexing(progress) => self.indexing = Some(progress),
+            AppEvent::Found { generation, hits } => {
+                // Results for text that has since been edited are stale.
+                if generation == self.search_generation {
+                    self.found = hits;
+                    self.search_index = self.search_index.min(self.search_rows().saturating_sub(1));
                 }
             }
             AppEvent::Incoming(messages) => {
                 for message in messages {
+                    if let Some(index) = &self.index_tx {
+                        let _ = index.send(message.clone());
+                    }
                     self.maybe_notify(&message);
                     self.on_incoming(message);
                 }
@@ -2011,10 +2340,7 @@ impl App {
                         if let Some(c) = self.chats.iter_mut().find(|c| c.guid == chat) {
                             c.last_message = Some(real.clone());
                         }
-                        // One more server row now exists ahead of our paging offset.
-                        if convo.absorb(real) {
-                            convo.fetched += 1;
-                        }
+                        convo.absorb(real);
                     }
                     Err(e) => {
                         if let Some(m) = convo.messages.iter_mut().find(|m| m.guid == temp) {
@@ -2030,6 +2356,9 @@ impl App {
                 // Ignore pictures for a conversation we have since left.
                 if self.images.contains_key(&guid) {
                     self.set_image(guid, result);
+                    if self.pinned && self.focus == Focus::Browse {
+                        self.reveal = true;
+                    }
                 }
             }
             AppEvent::Status(text) => self.set_status(text),
@@ -2157,13 +2486,13 @@ impl App {
             let is_open = self.open.as_deref() == Some(guid.as_str());
             let mut is_new = false;
             let mut read_now = false;
+            // A view parked in the past must not have today's messages
+            // appear straight after it; they load when it gets there.
             if let Some(convo) = self.convos.get_mut(&guid)
                 && convo.loaded
+                && !convo.detached
             {
                 is_new = convo.absorb(message.clone());
-                if is_new {
-                    convo.fetched += 1;
-                }
                 convo.settle();
             }
             if let Some(chat) = self.chats.iter_mut().find(|c| c.guid == guid) {
@@ -2330,6 +2659,7 @@ impl App {
             self.cache_sizes = Some((
                 metrics::folder_size(&cache.join("thumbs")),
                 metrics::folder_size(&cache.join("files")),
+                crate::index::size_on_disk(),
             ));
         }
     }
@@ -2372,20 +2702,6 @@ impl App {
 
     fn open_cursor(&mut self) {
         let Some(guid) = self.cursor.clone() else { return };
-        // A search result from beyond the loaded list.
-        if let Some(found) = self.search_extra.iter().find(|c| c.guid == guid).cloned() {
-            self.search_extra.clear();
-            if let Some(address) = found.guid.strip_prefix("new:") {
-                // A contact: opens their conversation if one exists.
-                return self.start_chat(address);
-            }
-            if !self.chats.iter().any(|c| c.guid == guid) {
-                let mut chat = found;
-                chat.touched = chrono::Utc::now().timestamp_millis();
-                self.chats.push(chat);
-                self.sort_chats();
-            }
-        }
         self.open_chat(&guid);
         self.focus = Focus::Compose;
     }
@@ -2462,10 +2778,17 @@ impl App {
             }
             return;
         }
+        if self.filtering {
+            return self.on_filter_key(key);
+        }
         let page = (self.view_rows / 2).max(1) as isize;
         match key.code {
             KeyCode::PageUp => return self.scroll_by(page),
             KeyCode::PageDown => return self.scroll_by(-page),
+            // End in the conversation: back to the newest message.
+            KeyCode::End if self.focus != Focus::List && self.input.is_empty() => {
+                return self.jump_to_latest();
+            }
             _ => {}
         }
         if self.picking.is_some() {
@@ -2487,10 +2810,8 @@ impl App {
                     self.pick_group = true;
                     self.pick_index = 0;
                 }
-                KeyCode::Char('/') => {
-                    self.filtering = true;
-                    self.filter.clear();
-                }
+                // Opens with the last search still there, ready to refine.
+                KeyCode::Char('/') => self.filtering = true,
                 KeyCode::Char('n') => {
                     self.picking = Some(String::new());
                     self.pick_chosen.clear();
@@ -2711,30 +3032,31 @@ impl App {
     }
 
     fn on_filter_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let rows = self.search_rows();
         match key.code {
-            KeyCode::Esc => {
-                self.filtering = false;
-                self.filter.clear();
-                self.refresh_search();
+            KeyCode::Esc => self.filtering = false,
+            KeyCode::Enter => self.open_search_result(),
+            KeyCode::Down | KeyCode::Tab if rows > 0 => {
+                self.search_index = (self.search_index + 1).min(rows - 1)
             }
-            KeyCode::Enter => {
-                self.filtering = false;
-                // Opening may move a result into the list; clear after.
-                self.open_cursor();
-                self.filter.clear();
-                self.refresh_search();
+            KeyCode::Up => self.search_index = self.search_index.saturating_sub(1),
+            KeyCode::PageDown if rows > 0 => {
+                self.search_index = (self.search_index + 8).min(rows - 1)
             }
-            KeyCode::Down => self.move_cursor(1),
-            KeyCode::Up => self.move_cursor(-1),
+            KeyCode::PageUp => self.search_index = self.search_index.saturating_sub(8),
+            KeyCode::Char('b') if ctrl => self.enable_index(),
+            KeyCode::Char('u') if ctrl => {
+                self.filter.clear();
+                self.search_changed();
+            }
             KeyCode::Backspace => {
                 self.filter.pop();
-                self.refresh_search();
-                self.cursor_to_edge(false);
+                self.search_changed();
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(c) if !ctrl => {
                 self.filter.push(c);
-                self.refresh_search();
-                self.cursor_to_edge(false);
+                self.search_changed();
             }
             _ => {}
         }

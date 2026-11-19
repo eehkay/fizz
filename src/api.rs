@@ -218,18 +218,97 @@ impl Api {
 
     /// One page of a chat's messages, newest first. Goes through the query
     /// endpoint because only that one can include link-preview data.
-    pub async fn messages(&self, chat: &str, offset: usize, limit: usize) -> Result<Vec<Message>> {
-        self.post(
-            "/message/query",
-            json!({
-                "chatGuid": chat,
-                "limit": limit,
-                "offset": offset,
-                "with": ["attachment", "handle", "payloadData"],
-                "sort": "DESC",
-            }),
-        )
-        .await
+    ///
+    /// History is walked by time rather than by position: `before` gives
+    /// the page ending just before that moment (newest first), `after` the
+    /// page starting just after it (oldest first). With neither, the most
+    /// recent page. Times are milliseconds.
+    pub async fn messages(
+        &self,
+        chat: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let mut body = json!({
+            "chatGuid": chat,
+            "limit": limit,
+            "with": ["attachment", "handle", "payloadData"],
+            "sort": if after.is_some() { "ASC" } else { "DESC" },
+        });
+        if let Some(before) = before {
+            body["before"] = json!(before);
+        }
+        if let Some(after) = after {
+            body["after"] = json!(after);
+        }
+        self.post("/message/query", body).await
+    }
+
+    /// A page of every chat's messages, for the local search index: text
+    /// and which chat each belongs to, and nothing heavier. `before` pages
+    /// back through history (newest first); `after` forward (oldest first).
+    pub async fn history(
+        &self,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        Ok(self.history_page(before, after, limit).await?.0)
+    }
+
+    /// As [`Api::history`] going back, with the server's count of all
+    /// messages, which gives the download something to measure against.
+    pub async fn history_with_total(
+        &self,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<(Vec<Message>, Option<u64>)> {
+        self.history_page(before, None, limit).await
+    }
+
+    async fn history_page(
+        &self,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<(Vec<Message>, Option<u64>)> {
+        let mut body = json!({
+            "limit": limit,
+            "with": ["chat", "handle"],
+            "sort": if after.is_some() { "ASC" } else { "DESC" },
+        });
+        if let Some(before) = before {
+            body["before"] = json!(before);
+        }
+        if let Some(after) = after {
+            body["after"] = json!(after);
+        }
+        let started = std::time::Instant::now();
+        let result = async {
+            let response = self
+                .http
+                .post(format!("{}/message/query", self.base))
+                .query(&self.auth())
+                .json(&body)
+                .send()
+                .await
+                .map_err(friendly)?;
+            let status = response.status();
+            let reply: Value = response
+                .json()
+                .await
+                .map_err(|_| anyhow!("the server sent an unreadable reply (HTTP {status})"))?;
+            if !status.is_success() {
+                return Err(anyhow!("the server refused the request (HTTP {})", status.as_u16()));
+            }
+            let total = reply.pointer("/metadata/total").and_then(|t| t.as_u64());
+            let data = reply.get("data").cloned().unwrap_or(Value::Null);
+            Ok((serde_json::from_value(data)?, total))
+        }
+        .await;
+        crate::metrics::record(&self.metrics, "search index", started, result.is_ok());
+        result
     }
 
     /// Start a one-to-one conversation by sending its first message.

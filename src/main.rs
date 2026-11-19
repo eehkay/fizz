@@ -7,6 +7,7 @@ mod demo;
 mod emoji;
 mod files;
 mod images;
+mod index;
 mod input;
 mod live;
 mod metrics;
@@ -44,6 +45,8 @@ Usage:
   fizz check      Test the connection and print what was found
   fizz config     Open the settings file in your editor
   fizz update     Install the newest version (--check only looks)
+  fizz index      Show the message-text search index (add: delete, to
+                  remove it and turn it off)
   fizz sound      Play the notification sound
   fizz --demo     Try the interface with made-up conversations
 
@@ -125,6 +128,9 @@ async fn main() -> Result<()> {
     if has("check") {
         return check(&config).await;
     }
+    if has("index") {
+        return index_command(&args, &config).await;
+    }
     if let Some(unknown) = args.first() {
         eprintln!("Unknown argument: {unknown}\n\n{HELP}");
         std::process::exit(2);
@@ -170,6 +176,66 @@ async fn check(config: &Config) -> Result<()> {
     }
     println!("Theme    {}", theme::Theme::load().name);
     println!("Pictures {}", picture_support());
+    Ok(())
+}
+
+/// `fizz index`: look at, build or remove the local copy of message text
+/// that searching by words uses.
+async fn index_command(args: &[String], config: &Config) -> Result<()> {
+    let has = |word: &str| args.iter().any(|a| a == word);
+    if has("delete") {
+        index::delete()?;
+        println!("The search index has been removed and turned off.");
+        return Ok(());
+    }
+    if has("build") {
+        // Download in the foreground, optionally only so many pages.
+        let pages = args
+            .iter()
+            .position(|a| a == "--pages")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|n| n.parse::<usize>().ok());
+        index::enable()?;
+        let api = Api::new(config)?;
+        let (tx, mut rx) = unbounded_channel();
+        let (_live_tx, live_rx) = unbounded_channel();
+        let work = tokio::spawn(index::run(api, tx, live_rx, pages.or(Some(usize::MAX))));
+        while let Some(event) = rx.recv().await {
+            if let app::AppEvent::Indexing(p) = event {
+                println!(
+                    "{:>3}%  {} messages stored",
+                    p.percent().map_or("  ?".into(), |n| n.to_string()),
+                    p.stored
+                );
+            }
+        }
+        return work.await?;
+    }
+    if let Some(i) = args.iter().position(|a| a == "count") {
+        // How many messages contain these words, and how long finding out took.
+        let query = args[i + 1..].join(" ");
+        let started = std::time::Instant::now();
+        let hits = index::search(&query, 100_000)?;
+        println!("{} messages in {} ms", hits.len(), started.elapsed().as_millis());
+        return Ok(());
+    }
+    if !index::enabled() {
+        println!("Message text is not being stored, so only names can be searched.");
+        println!("Turn it on inside Fizz: press / to search, then Ctrl+B.");
+        return Ok(());
+    }
+    let p = index::Progress::load();
+    println!("Stored    {} messages", p.stored);
+    println!(
+        "Progress  {}",
+        match (p.complete, p.percent()) {
+            (true, _) => "complete".to_string(),
+            (false, Some(n)) => format!("{n}% of the server's {} messages", p.total.unwrap_or(0)),
+            (false, None) => "just started".to_string(),
+        }
+    );
+    println!("On disk   {:.1} MB in {}", index::size_on_disk() as f64 / 1e6, index::dir().display());
+    println!("\nRemove it and turn it off with: fizz index delete");
     Ok(())
 }
 

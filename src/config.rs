@@ -230,8 +230,17 @@ impl Default for Updates {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+pub struct Search {
+    /// How many years of message text to keep for searching by words.
+    /// 0 keeps everything.
+    pub years: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub updates: Updates,
+    pub search: Search,
     pub notifications: Notifications,
     pub appearance: Appearance,
     pub media: Media,
@@ -300,6 +309,14 @@ pub const SETTINGS_TEMPLATE: &str = r#"# Fizz settings.
 # Install an update with: fizz update
 check = true
 every_hours = 6
+
+[search]
+# Searching messages by their words keeps a copy of message text on this
+# computer (it is off until you turn it on in the search screen with
+# Ctrl+B). It is small: roughly 15 MB for every 100,000 messages. To keep
+# only recent history, set a number of years here; 0 keeps everything.
+# See what it is using with: fizz index      Remove it: fizz index delete
+years = 0
 
 [notifications]
 # Desktop notifications for new messages in chats you are not looking at.
