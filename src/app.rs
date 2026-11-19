@@ -258,6 +258,9 @@ pub struct App {
     seen: HashMap<String, i64>,
     /// Whether the server can be told a chat was read.
     helper: bool,
+    /// Chats already marked read on the server this run, with the newest
+    /// message each had at the time, so the request is not repeated.
+    marked: HashMap<String, i64>,
 
     pub online: Option<bool>,
     status: Option<(String, Instant)>,
@@ -335,6 +338,7 @@ impl App {
             unread: HashSet::new(),
             seen: HashMap::new(),
             helper: false,
+            marked: HashMap::new(),
             online: None,
             status: None,
             quit: false,
@@ -499,10 +503,9 @@ impl App {
         let was_unread = self.seen.get(guid).is_none_or(|at| *at < latest);
         self.seen.insert(guid.to_string(), now);
         let Some(api) = self.api.clone() else { return };
-        if !was_unread {
-            return;
-        }
-        if let Ok(json) = serde_json::to_vec(&self.seen) {
+        if was_unread
+            && let Ok(json) = serde_json::to_vec(&self.seen)
+        {
             let path = Self::seen_path();
             if let Some(dir) = path.parent() {
                 let _ = std::fs::create_dir_all(dir);
@@ -513,11 +516,17 @@ impl App {
                 let _ = std::fs::rename(&tmp, &path);
             }
         }
-        if self.helper && crate::config::settings().messages.mark_read {
+        // Tell the server too. This must not depend on what Fizz itself
+        // remembers: a chat read here before the helper existed is still
+        // unread on the Mac. Once per chat per newest message is enough.
+        let already = self.marked.get(guid) == Some(&latest);
+        if self.helper && crate::config::settings().messages.mark_read && !already {
+            self.marked.insert(guid.to_string(), latest);
             let guid = guid.to_string();
             tokio::spawn(async move {
-                if let Err(e) = api.mark_read(&guid).await {
-                    crate::config::log(&format!("mark read failed: {e:#}"));
+                match api.mark_read(&guid).await {
+                    Ok(()) => crate::config::log("marked a chat read on the server"),
+                    Err(e) => crate::config::log(&format!("mark read failed: {e:#}")),
                 }
             });
         }
@@ -1363,8 +1372,17 @@ impl App {
                     && let (Some(api), Some(guid)) = (self.api.clone(), self.open.clone())
                     && !guid.starts_with("new:")
                 {
+                    let latest = self
+                        .chats
+                        .iter()
+                        .find(|c| c.guid == guid)
+                        .map_or(0, Chat::last_activity);
+                    self.marked.insert(guid.clone(), latest);
                     tokio::spawn(async move {
-                        let _ = api.mark_read(&guid).await;
+                        match api.mark_read(&guid).await {
+                            Ok(()) => crate::config::log("marked a chat read on the server"),
+                            Err(e) => crate::config::log(&format!("mark read failed: {e:#}")),
+                        }
                     });
                 }
             }
