@@ -264,6 +264,9 @@ pub struct App {
     last_keystroke: Instant,
     /// People already added while choosing who a new group is for.
     pub pick_chosen: Vec<(String, String)>,
+    /// Whether the picker was opened for a group (G) rather than one
+    /// person (n): Enter then adds people instead of starting at once.
+    pub pick_group: bool,
     /// Demo messages that have already had their pretend failure.
     demo_failed: HashSet<String>,
     /// The message waiting for "really unsend?" to be answered.
@@ -367,6 +370,7 @@ impl App {
             typing_mine: None,
             last_keystroke: Instant::now(),
             pick_chosen: Vec::new(),
+            pick_group: false,
             demo_failed: HashSet::new(),
             unsending: None,
             editing: None,
@@ -1468,6 +1472,7 @@ impl App {
     fn start_group(&mut self, addresses: Vec<String>) {
         self.picking = None;
         self.pick_chosen.clear();
+        self.pick_group = false;
         self.filter.clear();
         let mut addresses: Vec<String> = addresses.iter().map(|a| sendable_address(a)).collect();
         addresses.dedup();
@@ -2435,8 +2440,14 @@ impl App {
                 KeyCode::Char('q') => self.quit = true,
                 KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
                 KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
-                KeyCode::Char('g') | KeyCode::Home => self.cursor_to_edge(false),
-                KeyCode::Char('G') | KeyCode::End => self.cursor_to_edge(true),
+                KeyCode::Home => self.cursor_to_edge(false),
+                KeyCode::End => self.cursor_to_edge(true),
+                KeyCode::Char('G') => {
+                    self.picking = Some(String::new());
+                    self.pick_chosen.clear();
+                    self.pick_group = true;
+                    self.pick_index = 0;
+                }
                 KeyCode::Char('/') => {
                     self.filtering = true;
                     self.filter.clear();
@@ -2444,6 +2455,7 @@ impl App {
                 KeyCode::Char('n') => {
                     self.picking = Some(String::new());
                     self.pick_chosen.clear();
+                    self.pick_group = false;
                     self.pick_index = 0;
                 }
                 // Capital D, so it is never hit by accident.
@@ -2568,28 +2580,50 @@ impl App {
         }
     }
 
+    /// Add the highlighted person to the group being put together.
+    fn pick_add(&mut self) {
+        let candidates = self.pick_candidates();
+        let highlighted = candidates
+            .get(self.pick_index.min(candidates.len().saturating_sub(1)))
+            .cloned();
+        if let Some((name, address)) = highlighted {
+            let name = name.strip_prefix("Send to ").unwrap_or(&name).to_string();
+            if !self.pick_chosen.iter().any(|(_, a)| *a == address) {
+                self.pick_chosen.push((name, address));
+            }
+            self.picking = Some(String::new());
+            self.pick_index = 0;
+        }
+    }
+
     fn on_pick_key(&mut self, key: KeyEvent) {
         let count = self.pick_candidates().len();
         match key.code {
             KeyCode::Esc => {
                 self.picking = None;
                 self.pick_chosen.clear();
+                self.pick_group = false;
             }
             KeyCode::Down if count > 0 => self.pick_index = (self.pick_index + 1).min(count - 1),
             KeyCode::Up => self.pick_index = self.pick_index.saturating_sub(1),
             // Tab adds the highlighted person and keeps going: a group.
-            KeyCode::Tab => {
-                let highlighted = self
-                    .pick_candidates()
-                    .get(self.pick_index.min(count.saturating_sub(1)))
-                    .cloned();
-                if let Some((name, address)) = highlighted {
-                    let name = name.strip_prefix("Send to ").unwrap_or(&name).to_string();
-                    if !self.pick_chosen.iter().any(|(_, a)| *a == address) {
-                        self.pick_chosen.push((name, address));
+            KeyCode::Tab => self.pick_add(),
+            // Choosing a group: Enter adds whoever was searched for, and on
+            // an empty line starts the group with everyone added so far.
+            KeyCode::Enter if self.pick_group => {
+                let typed = self.picking.as_deref().is_some_and(|q| !q.trim().is_empty());
+                if typed {
+                    self.pick_add();
+                } else {
+                    let everyone: Vec<String> =
+                        self.pick_chosen.iter().map(|(_, a)| a.clone()).collect();
+                    match everyone.len() {
+                        0 => self.set_status("Type a name and press Enter to add them".into()),
+                        1 => self.set_status(
+                            "A group needs at least two people: add another, or Esc and press n".into(),
+                        ),
+                        _ => self.start_group(everyone),
                     }
-                    self.picking = Some(String::new());
-                    self.pick_index = 0;
                 }
             }
             KeyCode::Enter => {

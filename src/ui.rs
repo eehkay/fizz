@@ -609,10 +609,11 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("↑ ↓  or  j k", "Move between conversations"),
             ("Enter", "Open the conversation and start typing"),
-            ("n", "New conversation: type a name, number or email; Tab adds more people for a group"),
+            ("n", "New conversation: type a name, number or email"),
             ("D", "Delete the conversation everywhere (capital D; asks first)"),
             ("/", "Search every conversation and contact by name or number"),
-            ("g  G", "Jump to the top or bottom"),
+            ("G", "New group: type a name, Enter adds them; Enter on an empty line starts it"),
+            ("Home  End", "Jump to the top or bottom"),
             ("r", "Refresh"),
             ("q", "Quit"),
         ],
@@ -785,7 +786,8 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .map(|(name, _)| format!("{}, ", name.split_whitespace().next().unwrap_or(name)))
             .collect();
-        format!("To: {added}{query}▏")
+        let label = if app.pick_group { "New group" } else { "To" };
+        format!("{label}: {added}{query}▏")
     } else if app.filtering || !app.filter.is_empty() {
         format!("Search: {}{}", app.filter, if app.filtering { "▏" } else { "" })
     } else {
@@ -1705,10 +1707,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         &[("⏎", "save edit"), ("esc", "cancel")]
     } else if app.reacting.is_some() {
         &[("←→", "choose"), ("1-6", "pick"), ("⏎", "send"), ("esc", "cancel")]
+    } else if app.picking.is_some() && app.pick_group {
+        &[("type", "a name"), ("⏎", "add them"), ("⏎ on empty line", "start group"), ("⌫", "remove"), ("esc", "cancel")]
     } else if app.picking.is_some() {
         &[("type", "name or number"), ("↑↓", "choose"), ("tab", "add another"), ("⏎", "start"), ("esc", "cancel")]
     } else if app.focus == Focus::List {
-        &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("/", "search"), ("?", "help"), ("q", "quit")]
+        &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("G", "new group"), ("/", "search"), ("?", "help"), ("q", "quit")]
     } else if app.focus == Focus::Browse && app.selected_failed() {
         &[("⏎", "try again"), ("x", "discard"), ("esc", "back")]
     } else if app.focus == Focus::Browse && app.selected_text().is_some() {

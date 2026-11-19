@@ -203,7 +203,8 @@ The essentials:
 | ------------ | --------------------------- | ---------------------------- |
 | Chat list    | `↑` `↓` / `j` `k`           | Move                         |
 |              | `Enter`                     | Open and start typing        |
-|              | `n`                         | New conversation (`Tab` adds more people for a group) |
+|              | `n`                         | New conversation             |
+|              | `G`                         | New group conversation (capital G) |
 |              | `D`                         | Delete the conversation everywhere (capital D; asks first) |
 |              | `/`                         | Search every conversation and contact |
 |              | `q`                         | Quit                         |
@@ -248,9 +249,10 @@ you send its first message. On some macOS versions the server can only
 create a chat with the Private API helper connected (see below). Numbers typed without a country code get the default one from the settings
 file (`+1` unless changed); a leading `+` is always respected.
 
-For a group, press `Tab` instead of Enter to add the highlighted person and
-keep choosing; Enter starts the conversation with everyone added. Creating
-a group needs the server's Private API helper.
+For a group, press `G` (capital) instead. Type a name and press Enter to add
+that person, repeat for each one, then press Enter on an empty line to start
+the conversation. Backspace on an empty line removes the last person added.
+Creating a group needs the server's Private API helper.
 
 ## Pictures, video and files
 
@@ -343,7 +345,7 @@ What Fizz uses it for today:
 - Typing indicators: you see "is typing…" in the conversation and the chat
   list, and the other person sees yours while you write (`send_typing` in
   the settings turns yours off).
-- Groups: start a new group conversation from `n`.
+- Groups: start a new group conversation with `G`.
 - Deleting: `D` in the chat list deletes the highlighted conversation from
   Messages on the Mac, and from your other devices if Messages in iCloud is
   on. It asks first and cannot be undone.
