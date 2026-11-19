@@ -19,8 +19,10 @@ use crate::emoji;
 use crate::files::{self, Then};
 use crate::images::{self, ImageState};
 use crate::input::Input;
+use crate::metrics::{self, Usage};
 use crate::model::{
-    Attachment, Chat, Contact, Message, Reaction, TAPBACKS, normalize_address, sendable_address,
+    Attachment, Chat, Contact, Message, Reaction, ServerInfo, TAPBACKS, normalize_address,
+    sendable_address,
 };
 use crate::theme::Theme;
 
@@ -38,8 +40,9 @@ pub enum AppEvent {
         result: Result<Vec<Message>, String>,
     },
     ChatDetail(Chat),
-    /// Whether the server's Private API helper is connected.
-    Helper(bool),
+    /// What the server says about itself, including whether its Private
+    /// API helper is connected.
+    Info(ServerInfo),
     /// The result of an update check: the newer commit, if there is one.
     Update(Option<String>),
     /// A tapback we sent has been accepted (or refused).
@@ -220,6 +223,15 @@ pub struct App {
     pub convos: HashMap<String, Convo>,
     pub images: HashMap<String, ImageState>,
     pub focus: Focus,
+    /// The stats screen, and what it needs to show.
+    pub stats: bool,
+    pub info: Option<ServerInfo>,
+    pub started: Instant,
+    pub usage: Usage,
+    usage_at: Option<(Duration, Instant)>,
+    pub cpu_percent: Option<f32>,
+    /// Bytes in the picture cache and the downloaded-files cache.
+    pub cache_sizes: Option<(u64, u64)>,
     /// A newer version's commit, when one has been pushed.
     pub update: Option<String>,
     /// The tapback picker, and which of the six is highlighted.
@@ -301,6 +313,13 @@ impl App {
             convos: HashMap::new(),
             images: HashMap::new(),
             focus: Focus::List,
+            stats: false,
+            info: None,
+            started: Instant::now(),
+            usage: Usage::default(),
+            usage_at: None,
+            cpu_percent: None,
+            cache_sizes: None,
             update: None,
             reacting: None,
             selected: None,
@@ -366,7 +385,7 @@ impl App {
             let tx = self.tx.clone();
             tokio::spawn(async move {
                 if let Ok(info) = api.server_info().await {
-                    let _ = tx.send(AppEvent::Helper(info.private_api && info.helper_connected));
+                    let _ = tx.send(AppEvent::Info(info));
                 }
             });
         }
@@ -826,7 +845,7 @@ impl App {
 
     /// The message behind the current selection, and which part of it is
     /// selected (attachments count from zero, the text comes after them).
-    fn selected_message(&self) -> Option<(&Message, usize)> {
+    pub fn selected_message(&self) -> Option<(&Message, usize)> {
         let key = self.selected.as_deref()?;
         let convo = self.open.as_ref().and_then(|g| self.convos.get(g))?;
         let parts = |m: &Message| m.attachments.iter().filter(|a| !a.is_plugin_payload()).count();
@@ -1334,7 +1353,9 @@ impl App {
                 }
             }
             AppEvent::Update(found) => self.update = found,
-            AppEvent::Helper(connected) => {
+            AppEvent::Info(info) => {
+                let connected = info.private_api && info.helper_connected;
+                self.info = Some(info);
                 self.helper = connected;
                 // Catch up the chat that was opened before we knew.
                 if connected
@@ -1696,8 +1717,72 @@ impl App {
         }
     }
 
+    // ----- stats ---------------------------------------------------------
+
+    pub fn metrics(&self) -> Option<metrics::Shared> {
+        self.api.as_ref().map(|api| api.metrics.clone())
+    }
+
+    pub fn server_address(&self) -> Option<&str> {
+        self.api.as_ref().map(Api::address)
+    }
+
+    /// (conversations loaded, conversations searchable, contact addresses,
+    /// messages in the open conversation, pictures held in memory)
+    pub fn counts(&self) -> (usize, usize, usize, usize, usize) {
+        let open = self
+            .open
+            .as_ref()
+            .and_then(|g| self.convos.get(g))
+            .map_or(0, |c| c.messages.len());
+        let pictures = self
+            .images
+            .values()
+            .filter(|state| matches!(state, ImageState::Ready(_)))
+            .count();
+        (
+            self.chats.len(),
+            self.index.len().max(self.chats.len()),
+            self.people.len(),
+            open,
+            pictures,
+        )
+    }
+
+    /// Take a fresh reading of what the app is using.
+    fn sample_usage(&mut self) {
+        let now = metrics::usage();
+        if let (Some(cpu), Some((before, at))) = (now.cpu_time, self.usage_at) {
+            let wall = at.elapsed().as_secs_f32();
+            if wall > 0.2 {
+                self.cpu_percent = Some(cpu.saturating_sub(before).as_secs_f32() / wall * 100.0);
+            }
+        }
+        if let Some(cpu) = now.cpu_time {
+            self.usage_at = Some((cpu, Instant::now()));
+        }
+        self.usage = now;
+    }
+
+    fn toggle_stats(&mut self) {
+        self.stats = !self.stats;
+        if self.stats {
+            self.cpu_percent = None;
+            self.usage_at = None;
+            self.sample_usage();
+            let cache = crate::config::cache_dir();
+            self.cache_sizes = Some((
+                metrics::folder_size(&cache.join("thumbs")),
+                metrics::folder_size(&cache.join("files")),
+            ));
+        }
+    }
+
     pub fn on_tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+        if self.stats {
+            self.sample_usage();
+        }
         if self
             .status
             .as_ref()
@@ -1756,6 +1841,16 @@ impl App {
         if key.code == KeyCode::F(1) || (key.code == KeyCode::Char('?') && !typing && !self.help) {
             self.help = !self.help;
             self.help_scroll = 0;
+            return;
+        }
+        // Stats: F2 anywhere, `i` wherever it would not be typed as text.
+        if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('i') && !typing && !self.help) {
+            return self.toggle_stats();
+        }
+        if self.stats {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
+                self.stats = false;
+            }
             return;
         }
         if self.help {
@@ -1980,6 +2075,12 @@ impl App {
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.stats {
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.stats = false;
+            }
+            return;
+        }
         if self.help {
             match mouse.kind {
                 MouseEventKind::ScrollDown => self.help_scroll += 2,

@@ -13,6 +13,8 @@ pub struct Api {
     http: reqwest::Client,
     base: String,
     password: String,
+    /// Timings of every request, for the stats screen.
+    pub metrics: crate::metrics::Shared,
 }
 
 /// Percent-encode a path segment (chat guids contain `;` and `+`).
@@ -39,7 +41,13 @@ impl Api {
             http,
             base: format!("{}/api/v1", config.url),
             password: config.password.clone(),
+            metrics: crate::metrics::Shared::default(),
         })
+    }
+
+    /// The server's address, without the password.
+    pub fn address(&self) -> &str {
+        self.base.trim_end_matches("/api/v1")
     }
 
     fn auth(&self) -> [(&'static str, &str); 1] {
@@ -64,28 +72,49 @@ impl Api {
         Ok(serde_json::from_value(data)?)
     }
 
+    /// Note how long a request took and whether it worked.
+    fn timed<T>(&self, path: &str, started: std::time::Instant, result: Result<T>) -> Result<T> {
+        crate::metrics::record(
+            &self.metrics,
+            crate::metrics::kind(path),
+            started,
+            result.is_ok(),
+        );
+        result
+    }
+
     async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
-        let response = self
-            .http
-            .get(format!("{}{path}", self.base))
-            .query(&self.auth())
-            .query(query)
-            .send()
-            .await
-            .map_err(friendly)?;
-        Self::unwrap(response).await
+        let started = std::time::Instant::now();
+        let result = async {
+            let response = self
+                .http
+                .get(format!("{}{path}", self.base))
+                .query(&self.auth())
+                .query(query)
+                .send()
+                .await
+                .map_err(friendly)?;
+            Self::unwrap(response).await
+        }
+        .await;
+        self.timed(path, started, result)
     }
 
     async fn post<T: DeserializeOwned>(&self, path: &str, body: Value) -> Result<T> {
-        let response = self
-            .http
-            .post(format!("{}{path}", self.base))
-            .query(&self.auth())
-            .json(&body)
-            .send()
-            .await
-            .map_err(friendly)?;
-        Self::unwrap(response).await
+        let started = std::time::Instant::now();
+        let result = async {
+            let response = self
+                .http
+                .post(format!("{}{path}", self.base))
+                .query(&self.auth())
+                .json(&body)
+                .send()
+                .await
+                .map_err(friendly)?;
+            Self::unwrap(response).await
+        }
+        .await;
+        self.timed(path, started, result)
     }
 
     pub async fn server_info(&self) -> Result<ServerInfo> {

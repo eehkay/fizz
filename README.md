@@ -115,6 +115,20 @@ open the assistant in that folder and say:
 for the server details, never send a message as a test, and keep your
 conversations private.
 
+## Stats
+
+Press `i` (or `F2` while typing) for a live panel showing:
+
+- **Server:** its address and version, whether the Private API helper is
+  connected, the state of the live connection, and the catch-up poll
+- **Latency:** how long the last request took, the typical and slowest
+  times, and a bar chart of recent requests
+- **Fizz:** version, uptime, CPU and memory use, how pictures are being
+  drawn
+- **Data:** conversations loaded and searchable, contacts, cache size
+- **Selected message:** who sent it, exact sent, delivered and read times,
+  its attachments and its ID. Select a message with `Tab` first.
+
 ## Updating
 
 Fizz checks now and then whether a newer version has been pushed, and shows
@@ -204,6 +218,7 @@ The essentials:
 |              | `c`                         | Copy the message's text (`y` works too) |
 |              | `r`                         | React with a tapback (needs the Private API helper) |
 | Anywhere     | `?` / `F1`                  | Help                         |
+|              | `i` / `F2`                  | Stats (see below)            |
 |              | `Ctrl+C`                    | Quit                         |
 
 The mouse works too: click a conversation to open it, wheel to scroll, click

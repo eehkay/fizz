@@ -9,6 +9,7 @@ mod files;
 mod images;
 mod input;
 mod live;
+mod metrics;
 mod model;
 mod theme;
 mod update;

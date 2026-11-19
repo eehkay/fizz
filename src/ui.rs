@@ -172,6 +172,320 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.help {
         draw_help(frame, app, main);
     }
+    if app.stats {
+        draw_stats(frame, app, main);
+    }
+}
+
+// ----- stats screen ----------------------------------------------------
+
+fn short_time(d: std::time::Duration) -> String {
+    match d.as_millis() {
+        ms @ 0..1000 => format!("{ms} ms"),
+        ms => format!("{:.1} s", ms as f64 / 1000.0),
+    }
+}
+
+fn ago(at: Option<std::time::Instant>) -> String {
+    match at.map(|at| at.elapsed().as_secs()) {
+        None => "not yet".into(),
+        Some(s @ 0..60) => format!("{s}s ago"),
+        Some(s @ 60..3600) => format!("{}m ago", s / 60),
+        Some(s) => format!("{}h {}m ago", s / 3600, s % 3600 / 60),
+    }
+}
+
+fn span_of(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {}s", s / 60, s % 60),
+        _ => format!("{}h {}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+fn exact_time(ms: i64) -> String {
+    let format = if crate::config::settings().appearance.clock == "24h" {
+        "%b %-d, %Y %H:%M:%S"
+    } else {
+        "%b %-d, %Y %-I:%M:%S %p"
+    };
+    local(ms).format(format).to_string()
+}
+
+/// Request times as a row of bars, tallest for the slowest.
+fn sparkline(times: &[std::time::Duration]) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let top = times.iter().max().map_or(1, |d| d.as_micros().max(1));
+    times
+        .iter()
+        .map(|d| BARS[((d.as_micros() * 7) / top) as usize])
+        .collect()
+}
+
+type Rows = Vec<(String, String)>;
+
+fn stat_lines(theme: &Theme, sections: Vec<(&str, Rows)>, w: usize) -> Vec<Line<'static>> {
+    const KEY_W: usize = 15;
+    let mut lines = Vec::new();
+    for (title, rows) in sections {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(
+            title.to_string(),
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+        for (key, value) in rows {
+            let value = truncate(&value, w.saturating_sub(KEY_W).max(8));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{key}{}", pad(KEY_W.saturating_sub(width(&key)))),
+                    Style::new().fg(theme.muted),
+                ),
+                Span::styled(value, Style::new().fg(theme.bright)),
+            ]));
+        }
+    }
+    lines
+}
+
+fn draw_stats(frame: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme.clone();
+    let row = |k: &str, v: String| (k.to_string(), v);
+
+    // --- the server and the connection to it
+    let mut server: Rows = Vec::new();
+    let mut latency: Rows = Vec::new();
+    match (app.server_address(), app.metrics()) {
+        (Some(address), Some(metrics)) => {
+            server.push(row("Address", address.to_string()));
+            if let Some(info) = &app.info {
+                server.push(row(
+                    "Server",
+                    format!(
+                        "BlueBubbles {} · macOS {}",
+                        info.server_version.as_deref().unwrap_or("?"),
+                        info.os_version.as_deref().unwrap_or("?")
+                    ),
+                ));
+                server.push(row(
+                    "Private API",
+                    match (info.private_api, info.helper_connected) {
+                        (true, true) => "connected",
+                        (true, false) => "enabled, helper not connected",
+                        _ => "off",
+                    }
+                    .to_string(),
+                ));
+            }
+            if let Ok(m) = metrics.lock() {
+                server.push(row(
+                    "Live updates",
+                    match m.live {
+                        Some(true) if m.live_events == 0 => "connected · nothing received yet".into(),
+                        Some(true) => format!(
+                            "connected · {} received · last {}",
+                            m.live_events,
+                            ago(m.last_live_event)
+                        ),
+                        Some(false) => "reconnecting (the poll below covers the gap)".into(),
+                        None => "connecting".into(),
+                    },
+                ));
+                server.push(row(
+                    "Catch-up poll",
+                    format!(
+                        "every {}s · last {} · {} failed of {}",
+                        crate::config::settings().messages.poll_seconds,
+                        ago(m.last_poll),
+                        m.poll_failures,
+                        m.polls
+                    ),
+                ));
+                let l = m.latency();
+                let named = |v: Option<(std::time::Duration, &str)>| {
+                    v.map_or("no requests yet".into(), |(d, what)| {
+                        format!("{} ({what})", short_time(d))
+                    })
+                };
+                latency.push(row("Last request", named(l.last)));
+                latency.push(row(
+                    "Typical",
+                    l.median.map_or("no requests yet".into(), short_time),
+                ));
+                latency.push(row("Slowest", named(l.slowest)));
+                latency.push(row("Recent", sparkline(&l.recent)));
+                latency.push(row(
+                    "Requests",
+                    format!("{} sent · {} failed", m.requests, m.failures),
+                ));
+            }
+        }
+        _ => server.push(row("Address", "none (this is the demo)".into())),
+    }
+
+    // --- the app itself
+    let commit = crate::update::built_commit();
+    let (loaded, searchable, contacts, open_messages, pictures) = app.counts();
+    let mut fizz: Rows = vec![
+        row(
+            "Version",
+            if commit.is_empty() {
+                env!("CARGO_PKG_VERSION").to_string()
+            } else {
+                format!("{} ({})", env!("CARGO_PKG_VERSION"), crate::update::short(&commit))
+            },
+        ),
+        row("Running for", span_of(app.started.elapsed())),
+        row(
+            "CPU",
+            app.cpu_percent
+                .map_or("measuring…".into(), |p| format!("{p:.1}%")),
+        ),
+        row(
+            "Memory",
+            app.usage.memory_bytes.map_or("unknown".into(), file_size),
+        ),
+    ];
+    if let Some(threads) = app.usage.threads {
+        fizz.push(row("Threads", threads.to_string()));
+    }
+    fizz.push(row(
+        "Pictures",
+        format!("{:?} · {pictures} in memory", app.picker.protocol_type()).to_lowercase(),
+    ));
+    fizz.push(row("Theme", theme.name.clone()));
+
+    let mut data: Rows = vec![
+        row(
+            "Conversations",
+            format!("{loaded} loaded · {searchable} searchable"),
+        ),
+        row("Contacts", format!("{contacts} addresses")),
+        row("Open chat", format!("{open_messages} messages loaded")),
+    ];
+    if let Some((thumbs, files)) = app.cache_sizes {
+        data.push(row(
+            "Cache on disk",
+            format!("pictures {} · files {}", file_size(thumbs), file_size(files)),
+        ));
+    }
+
+    // --- the selected message, if there is one
+    let mut message: Rows = Vec::new();
+    match app.selected_message() {
+        Some((m, _)) => {
+            let from = if m.is_from_me {
+                "you".to_string()
+            } else {
+                m.handle.as_ref().map_or("unknown".into(), |h| {
+                    format!("{} ({})", app.name_for(&h.address), h.address)
+                })
+            };
+            message.push(row("From", from));
+            let service = m
+                .handle
+                .as_ref()
+                .and_then(|h| h.service.clone())
+                .unwrap_or_else(|| "not reported".into());
+            message.push(row("Service", service));
+            message.push(row("Sent", exact_time(m.date_created)));
+            message.push(row(
+                "Delivered",
+                m.date_delivered.map_or(
+                    if m.is_delivered { "yes" } else { "not reported" }.to_string(),
+                    exact_time,
+                ),
+            ));
+            message.push(row(
+                "Read",
+                m.date_read.map_or("not reported".to_string(), exact_time),
+            ));
+            if m.error != 0 {
+                message.push(row("Error code", m.error.to_string()));
+            }
+            if let Some(reason) = &m.failed {
+                message.push(row("Not sent", reason.clone()));
+            }
+            message.push(row("Length", format!("{} characters", m.body().chars().count())));
+            for a in m.attachments.iter().filter(|a| !a.is_plugin_payload()) {
+                message.push(row(
+                    "Attachment",
+                    format!(
+                        "{} · {} · {}",
+                        a.name(),
+                        a.mime_type.as_deref().unwrap_or("unknown type"),
+                        a.total_bytes.map(file_size).unwrap_or_default()
+                    ),
+                ));
+            }
+            if m.thread_originator_guid.is_some() {
+                message.push(row("Reply", "to an earlier message".into()));
+            }
+            message.push(row("ID", m.guid.clone()));
+        }
+        None => message.push(row(
+            "",
+            "Tab to select a message, then i".into(),
+        )),
+    }
+
+    // Two columns when there is room.
+    let two = area.width >= 116;
+    let w = area.width.saturating_sub(4).min(if two { 132 } else { 72 });
+    let col_w = if two { (w - 7) / 2 } else { w.saturating_sub(4) };
+    let cw = usize::from(col_w);
+    let columns: Vec<Vec<Line>> = if two {
+        vec![
+            stat_lines(&theme, vec![("Server", server), ("Latency", latency), ("Selected message", message)], cw),
+            stat_lines(&theme, vec![("Fizz", fizz), ("Data", data)], cw),
+        ]
+    } else {
+        vec![stat_lines(
+            &theme,
+            vec![
+                ("Server", server),
+                ("Latency", latency),
+                ("Fizz", fizz),
+                ("Data", data),
+                ("Selected message", message),
+            ],
+            cw,
+        )]
+    };
+    let content = columns.iter().map(Vec::len).max().unwrap_or(0) as u16;
+    let h = (content + 4).min(area.height.saturating_sub(2)).max(5);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w.min(area.width),
+        h.min(area.height),
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .title(Span::styled(
+            " Fizz stats ",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup).inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(block, popup);
+    for (i, lines) in columns.into_iter().enumerate() {
+        let column = Rect::new(
+            inner.x + i as u16 * (col_w + 3),
+            inner.y,
+            col_w.min(inner.width),
+            inner.height,
+        );
+        frame.render_widget(Paragraph::new(lines), column);
+    }
+    let foot = Span::styled(" updates every second · esc close ", Style::new().fg(theme.muted));
+    let fw = foot.width() as u16;
+    if popup.width > fw + 4 {
+        frame.render_widget(foot, Rect::new(popup.right() - fw - 2, popup.bottom() - 1, fw, 1));
+    }
 }
 
 /// The wordmark.
@@ -295,6 +609,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         "Anywhere",
         &[
             ("?  or  F1", "This help (F1 while typing)"),
+            ("i  or  F2", "Stats: latency, connection, CPU and memory, and details of the selected message"),
             ("Ctrl+C", "Quit"),
         ],
     ),
@@ -1258,7 +1573,9 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         left.push(Span::styled(status.to_string(), Style::new().fg(theme.text)));
     }
 
-    let hints: &[(&str, &str)] = if app.help {
+    let hints: &[(&str, &str)] = if app.stats {
+        &[("esc", "close stats")]
+    } else if app.help {
         &[("esc", "close help")]
     } else if app.filtering {
         &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("esc", "cancel")]

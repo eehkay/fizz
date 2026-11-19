@@ -24,8 +24,9 @@ fn now_ms() -> i64 {
 
 pub fn start(api: Api, config: Config, tx: UnboundedSender<AppEvent>) {
     let nudge = Arc::new(Notify::new());
+    let metrics = api.metrics.clone();
     tokio::spawn(poll(api, tx.clone(), nudge.clone()));
-    tokio::spawn(socket(config, tx, nudge));
+    tokio::spawn(socket(config, tx, nudge, metrics));
 }
 
 async fn poll(api: Api, tx: UnboundedSender<AppEvent>, nudge: Arc<Notify>) {
@@ -37,7 +38,15 @@ async fn poll(api: Api, tx: UnboundedSender<AppEvent>, nudge: Arc<Notify>) {
             _ = nudge.notified() => {}
             _ = tokio::time::sleep(poll_every) => {}
         }
-        match api.messages_after(since).await {
+        let result = api.messages_after(since).await;
+        if let Ok(mut m) = api.metrics.lock() {
+            m.polls += 1;
+            m.last_poll = Some(std::time::Instant::now());
+            if result.is_err() {
+                m.poll_failures += 1;
+            }
+        }
+        match result {
             Ok(messages) => {
                 if let Some(latest) = messages.iter().map(|m| m.date_created).max() {
                     since = since.max(latest);
@@ -58,14 +67,37 @@ async fn poll(api: Api, tx: UnboundedSender<AppEvent>, nudge: Arc<Notify>) {
     }
 }
 
-async fn socket(config: Config, tx: UnboundedSender<AppEvent>, nudge: Arc<Notify>) {
+async fn socket(
+    config: Config,
+    tx: UnboundedSender<AppEvent>,
+    nudge: Arc<Notify>,
+    metrics: crate::metrics::Shared,
+) {
     let url = format!("{}/?password={}", config.url, encode(&config.password));
     loop {
-        let on_message = {
-            let (tx, nudge) = (tx.clone(), nudge.clone());
-            move |payload: Payload, _: Client| {
-                let (tx, nudge) = (tx.clone(), nudge.clone());
+        // Keep the stats screen's idea of the connection current.
+        let mark = |up: bool| {
+            let metrics = metrics.clone();
+            move |_: Payload, _: Client| {
+                let metrics = metrics.clone();
                 async move {
+                    if let Ok(mut m) = metrics.lock() {
+                        m.live = Some(up);
+                    }
+                }
+                .boxed()
+            }
+        };
+        let on_message = {
+            let (tx, nudge, metrics) = (tx.clone(), nudge.clone(), metrics.clone());
+            move |payload: Payload, _: Client| {
+                let (tx, nudge, metrics) = (tx.clone(), nudge.clone(), metrics.clone());
+                async move {
+                    if let Ok(mut m) = metrics.lock() {
+                        m.live = Some(true);
+                        m.live_events += 1;
+                        m.last_live_event = Some(std::time::Instant::now());
+                    }
                     if let Payload::Text(values) = payload {
                         let parsed: Vec<Message> = values
                             .into_iter()
@@ -85,6 +117,9 @@ async fn socket(config: Config, tx: UnboundedSender<AppEvent>, nudge: Arc<Notify
         let client = ClientBuilder::new(url.clone())
             .on("new-message", on_message.clone())
             .on("updated-message", on_message)
+            .on(rust_socketio::Event::Connect, mark(true))
+            .on(rust_socketio::Event::Close, mark(false))
+            .on(rust_socketio::Event::Error, mark(false))
             .reconnect(true)
             .reconnect_on_disconnect(true)
             .reconnect_delay(1_000, 20_000)
