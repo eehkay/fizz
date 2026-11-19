@@ -24,8 +24,15 @@ iMessage in your terminal, through a [BlueBubbles](https://bluebubbles.app) serv
 ## Install
 
 ```sh
+git clone https://github.com/eehkay/fizz.git
+cd fizz
 cargo install --path .
 ```
+
+The repository is private, so you need to have been invited to it and be
+signed in to GitHub on that machine (`gh auth login` is the easy way).
+`cargo install` puts `fizz` in `~/.cargo/bin`; make sure that is on your
+`PATH`.
 
 ## Use
 
