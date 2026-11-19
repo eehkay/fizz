@@ -118,6 +118,15 @@ impl Api {
         .await
     }
 
+    /// Mark a chat read on the Mac, which clears it on the user's other
+    /// devices. The server only allows this with the Private API helper.
+    pub async fn mark_read(&self, chat: &str) -> Result<()> {
+        let _: Value = self
+            .post(&format!("/chat/{}/read", encode(chat)), json!({}))
+            .await?;
+        Ok(())
+    }
+
     /// One chat with its participants.
     pub async fn chat(&self, guid: &str) -> Result<Chat> {
         self.get(&format!("/chat/{}", encode(guid)), &[("with", "participants")])

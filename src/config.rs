@@ -18,6 +18,15 @@ pub fn config_path() -> PathBuf {
         .join("env")
 }
 
+/// Where Fizz keeps what it has learned between runs, such as which
+/// conversations you have already read.
+pub fn state_dir() -> PathBuf {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("fizz")
+}
+
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
@@ -196,6 +205,8 @@ pub struct Messages {
     pub send_method: String,
     pub emoji_popup: bool,
     pub poll_seconds: u64,
+    /// Tell the server when a chat has been read (needs the Private API).
+    pub mark_read: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -249,6 +260,7 @@ impl Default for Messages {
             send_method: "apple-script".into(),
             emoji_popup: true,
             poll_seconds: 12,
+            mark_read: true,
         }
     }
 }
@@ -307,6 +319,10 @@ send_method = "apple-script"
 emoji_popup = true
 # How often to check for anything the live connection missed, in seconds.
 poll_seconds = 12
+# When you open a chat, mark it read on the Mac too, so it clears on your
+# other devices. Only possible with the Private API helper connected;
+# without it Fizz just remembers what you have read on this computer.
+mark_read = true
 "#;
 
 pub fn settings_path() -> PathBuf {

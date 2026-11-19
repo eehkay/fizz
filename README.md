@@ -145,7 +145,7 @@ its default written out, each with a comment. It covers:
 - **Media:** inline pictures on or off, how large they are drawn, video
   stills and their size limit, where files are saved
 - **Messages:** default country code for new chats, send method, the emoji
-  popup, how often to poll
+  popup, how often to poll, whether to mark chats read on the server
 
 Restart Fizz after changing it. A typo does not stop Fizz starting: it says
 so in the status line (and in `fizz check`) and uses the defaults.
@@ -276,6 +276,8 @@ What Fizz uses it for today:
 - `fizz check` reports whether the helper is connected.
 - Setting `send_method = "private-api"` in the settings file sends through
   it.
+- Opening a chat marks it read on the Mac, which clears it on your other
+  devices.
 - Starting a new conversation may need it, depending on the macOS version,
   since creating chats is one of the things the helper is for. If a new
   conversation fails to start, this is the likely reason.
@@ -343,7 +345,11 @@ patched (OpenCore) Macs, which differ.
 - Sending uses the server's AppleScript method, so it works without the
   BlueBubbles Private API. Sending tapbacks, edits and typing indicators,
   and deleting chats, need that API and are not implemented.
-- Opening a conversation does not mark it read on your other devices.
+- Unread dots: Fizz remembers which conversations you have opened (in
+  `~/.local/state/fizz/seen.json`), so they stay read across restarts.
+  Marking them read on the Mac and your other devices needs the Private
+  API helper; once it is connected Fizz does that too (`mark_read` in the
+  settings turns it off).
 - Shrunken copies of pictures are cached in `~/.cache/fizz/thumbs`; delete
   the folder any time. Failures are noted in `~/.cache/fizz/fizz.log`.
 - Opened files (and videos fetched for their still) are kept in

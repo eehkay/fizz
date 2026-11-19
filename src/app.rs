@@ -38,6 +38,8 @@ pub enum AppEvent {
         result: Result<Vec<Message>, String>,
     },
     ChatDetail(Chat),
+    /// Whether the server's Private API helper is connected.
+    Helper(bool),
     /// A slice of the server's full chat list, for searching by name.
     Index(Vec<Chat>),
     Contacts(Vec<Contact>),
@@ -228,7 +230,11 @@ pub struct App {
     draft_files: HashMap<String, Vec<PathBuf>>,
 
     unread: HashSet<String>,
-    seen: HashSet<String>,
+    /// When each chat was last looked at (milliseconds), kept across runs
+    /// so read chats stay read even though the server is not told.
+    seen: HashMap<String, i64>,
+    /// Whether the server can be told a chat was read.
+    helper: bool,
 
     pub online: Option<bool>,
     status: Option<(String, Instant)>,
@@ -295,7 +301,8 @@ impl App {
             pending_files: Vec::new(),
             draft_files: HashMap::new(),
             unread: HashSet::new(),
-            seen: HashSet::new(),
+            seen: HashMap::new(),
+            helper: false,
             online: None,
             status: None,
             quit: false,
@@ -339,6 +346,17 @@ impl App {
     }
 
     pub fn start(&mut self) {
+        if let Ok(bytes) = std::fs::read(Self::seen_path()) {
+            self.seen = serde_json::from_slice(&bytes).unwrap_or_default();
+        }
+        if let Some(api) = self.api.clone() {
+            let tx = self.tx.clone();
+            tokio::spawn(async move {
+                if let Ok(info) = api.server_info().await {
+                    let _ = tx.send(AppEvent::Helper(info.private_api && info.helper_connected));
+                }
+            });
+        }
         if let Some(problem) = crate::config::settings_problem() {
             self.set_status(format!("Settings file ignored: {problem}"));
         }
@@ -422,12 +440,55 @@ impl App {
         if self.unread.contains(&chat.guid) {
             return true;
         }
-        if self.seen.contains(&chat.guid) {
-            return false;
+        let seen_at = self.seen.get(&chat.guid).copied().unwrap_or(0);
+        chat.last_message.as_ref().is_some_and(|m| {
+            !m.is_from_me && m.date_read.is_none() && m.item_type == 0 && m.date_created > seen_at
+        })
+    }
+
+    fn seen_path() -> PathBuf {
+        crate::config::state_dir().join("seen.json")
+    }
+
+    /// Record that a chat has been read up to now: remembered here across
+    /// restarts, and passed on to the server when it can accept it.
+    fn mark_seen(&mut self, guid: &str) {
+        self.unread.remove(guid);
+        if guid.starts_with("new:") {
+            return;
         }
-        chat.last_message
-            .as_ref()
-            .is_some_and(|m| !m.is_from_me && m.date_read.is_none() && m.item_type == 0)
+        // The Mac's clock stamps the messages; allow for ours being behind.
+        let latest = self
+            .chats
+            .iter()
+            .find(|c| c.guid == guid)
+            .map_or(0, Chat::last_activity);
+        let now = chrono::Utc::now().timestamp_millis().max(latest);
+        let was_unread = self.seen.get(guid).is_none_or(|at| *at < latest);
+        self.seen.insert(guid.to_string(), now);
+        let Some(api) = self.api.clone() else { return };
+        if !was_unread {
+            return;
+        }
+        if let Ok(json) = serde_json::to_vec(&self.seen) {
+            let path = Self::seen_path();
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            // Write then rename, so a crash never leaves half a file.
+            let tmp = path.with_extension("tmp");
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+        if self.helper && crate::config::settings().messages.mark_read {
+            let guid = guid.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = api.mark_read(&guid).await {
+                    crate::config::log(&format!("mark read failed: {e:#}"));
+                }
+            });
+        }
     }
 
     // ----- chat list ---------------------------------------------------
@@ -610,8 +671,7 @@ impl App {
             // Pictures are kept only for the conversation on screen.
             self.images.clear();
         }
-        self.unread.remove(guid);
-        self.seen.insert(guid.to_string());
+        self.mark_seen(guid);
         let convo = self.convos.entry(guid.to_string()).or_default();
         convo.scroll = 0;
         if !convo.loaded && !convo.loading {
@@ -1175,6 +1235,19 @@ impl App {
                     self.refresh_search();
                 }
             }
+            AppEvent::Helper(connected) => {
+                self.helper = connected;
+                // Catch up the chat that was opened before we knew.
+                if connected
+                    && crate::config::settings().messages.mark_read
+                    && let (Some(api), Some(guid)) = (self.api.clone(), self.open.clone())
+                    && !guid.starts_with("new:")
+                {
+                    tokio::spawn(async move {
+                        let _ = api.mark_read(&guid).await;
+                    });
+                }
+            }
             AppEvent::ChatDetail(detail) => {
                 if let Some(chat) = self.chats.iter_mut().find(|c| c.guid == detail.guid) {
                     chat.participants = detail.participants;
@@ -1427,6 +1500,7 @@ impl App {
             let guid = chat_ref.guid;
             let is_open = self.open.as_deref() == Some(guid.as_str());
             let mut is_new = false;
+            let mut read_now = false;
             if let Some(convo) = self.convos.get_mut(&guid)
                 && convo.loaded
             {
@@ -1448,11 +1522,18 @@ impl App {
                         .as_ref()
                         .is_none_or(|last| last.guid != message.guid);
                     chat.last_message = Some(message.clone());
-                    if fresh && !message.is_from_me && !is_open {
-                        self.unread.insert(guid.clone());
-                        self.seen.remove(&guid);
+                    if fresh && !message.is_from_me {
+                        if is_open {
+                            read_now = true;
+                        } else {
+                            self.unread.insert(guid.clone());
+                        }
                     }
                 }
+            }
+            if read_now {
+                // It arrived in the conversation you have open.
+                self.mark_seen(&guid);
             }
             let _ = is_new;
         }
