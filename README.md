@@ -71,6 +71,10 @@ BB_URL=http://my-mac:1234
 BB_PASSWORD=...
 ```
 
+`fizz setup` writes that file for you. To create it by hand, copy
+[`env.example`](env.example) from this repository, which explains both
+values and the address forms that work.
+
 ## Keys
 
 **Press `?` in the app for the full list** (`F1` while typing a message).

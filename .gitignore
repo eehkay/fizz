@@ -1,1 +1,5 @@
 /target
+
+# Real server details must never be committed; only env.example is.
+/env
+.env
