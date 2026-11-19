@@ -25,11 +25,7 @@ use crate::model::{
 use crate::theme::Theme;
 
 /// The largest box, in terminal cells, a picture may take in the timeline.
-pub const IMAGE_COLS: u16 = 38;
-pub const IMAGE_ROWS: u16 = 14;
 
-/// Videos up to this size get a still frame shown inline.
-const STILL_LIMIT: u64 = 40 * 1024 * 1024;
 
 /// How many of the newest messages to scan per step when building the list.
 const SCAN_PAGE: usize = 400;
@@ -253,7 +249,11 @@ impl App {
             help: false,
             help_scroll: 0,
             window_focused: true,
-            notify: std::env::var("FIZZ_NOTIFY").map_or(true, |v| v != "0" && v != "off"),
+            // FIZZ_NOTIFY=0 turns them off for one run without editing settings.
+            notify: std::env::var("FIZZ_NOTIFY").map_or(
+                crate::config::settings().notifications.enabled,
+                |v| v != "0" && v != "off",
+            ),
             notified: HashSet::new(),
             started_ms: chrono::Utc::now().timestamp_millis(),
             can_make_stills: false,
@@ -319,6 +319,9 @@ impl App {
     }
 
     pub fn start(&mut self) {
+        if let Some(problem) = crate::config::settings_problem() {
+            self.set_status(format!("Settings file ignored: {problem}"));
+        }
         self.can_make_stills = images::can_make_stills();
         self.fetch_chats(0);
         if let Some(api) = self.api.clone() {
@@ -531,7 +534,12 @@ impl App {
         let Some(convo) = self.open.as_ref().and_then(|g| self.convos.get(g)) else {
             return;
         };
-        let stills = self.can_make_stills;
+        let media = &crate::config::settings().media;
+        if !media.pictures {
+            return;
+        }
+        let stills = self.can_make_stills && media.video_stills;
+        let still_limit = media.video_still_limit_mb.saturating_mul(1024 * 1024);
         let wanted: Vec<Attachment> = convo
             .messages
             .iter()
@@ -540,15 +548,15 @@ impl App {
             .filter(|a| !a.is_plugin_payload())
             .filter(|a| {
                 a.is_image()
-                    || (stills && a.is_video() && a.total_bytes.is_some_and(|b| b <= STILL_LIMIT))
+                    || (stills && a.is_video() && a.total_bytes.is_some_and(|b| b <= still_limit))
             })
             .filter(|a| !self.images.contains_key(&a.guid))
             .cloned()
             .collect();
         let font = self.picker.font_size();
         let box_px = (
-            u32::from(IMAGE_COLS) * u32::from(font.width),
-            u32::from(IMAGE_ROWS) * u32::from(font.height),
+            u32::from(media.picture_columns) * u32::from(font.width),
+            u32::from(media.picture_rows) * u32::from(font.height),
         );
         for attachment in wanted {
             let guid = attachment.guid.clone();
@@ -833,7 +841,12 @@ impl App {
             Some(chat) if chat.is_group() => format!("{sender} · {}", self.chat_title(chat)),
             _ => sender,
         };
-        files::notify(&title, &message.summary());
+        let body = if crate::config::settings().notifications.preview {
+            message.summary()
+        } else {
+            "New message".to_string()
+        };
+        files::notify(&title, &body);
     }
 
     fn scroll_by(&mut self, rows: isize) {
@@ -846,7 +859,10 @@ impl App {
 
     /// Emoji to offer for the `:name` being typed; empty when there is none.
     pub fn emoji_matches(&self) -> Vec<emoji::Match> {
-        if self.focus != Focus::Compose || self.emoji_hidden {
+        if self.focus != Focus::Compose
+            || self.emoji_hidden
+            || !crate::config::settings().messages.emoji_popup
+        {
             return Vec::new();
         }
         self.input

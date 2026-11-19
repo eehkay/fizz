@@ -17,7 +17,6 @@ use crate::app::AppEvent;
 use crate::config::Config;
 use crate::model::Message;
 
-const POLL_EVERY: Duration = Duration::from_secs(12);
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -32,10 +31,11 @@ pub fn start(api: Api, config: Config, tx: UnboundedSender<AppEvent>) {
 async fn poll(api: Api, tx: UnboundedSender<AppEvent>, nudge: Arc<Notify>) {
     // Start a little in the past: the Mac's clock and ours may disagree.
     let mut since = now_ms() - 120_000;
+    let poll_every = Duration::from_secs(crate::config::settings().messages.poll_seconds);
     loop {
         tokio::select! {
             _ = nudge.notified() => {}
-            _ = tokio::time::sleep(POLL_EVERY) => {}
+            _ = tokio::time::sleep(poll_every) => {}
         }
         match api.messages_after(since).await {
             Ok(messages) => {

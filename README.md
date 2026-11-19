@@ -43,7 +43,28 @@ fizz setup     # change the server details
 fizz --demo    # look around with made-up conversations, no server needed
 ```
 
-Settings are stored in `~/.config/fizz/env`:
+## Settings
+
+```sh
+fizz config     # opens the settings file in your $EDITOR
+```
+
+`~/.config/fizz/config.toml` is created on first run with every option and
+its default written out, each with a comment. It covers:
+
+- **Notifications:** on or off, and whether they show the message text
+- **Appearance:** theme (`auto`, `terminal`, or a `colors.toml` path), 12 or
+  24 hour clock, chat list width, conversation width, mouse on or off
+- **Media:** inline pictures on or off, how large they are drawn, video
+  stills and their size limit, where files are saved
+- **Messages:** default country code for new chats, send method, the emoji
+  popup, how often to poll
+
+Restart Fizz after changing it. A typo does not stop Fizz starting: it says
+so in the status line (and in `fizz check`) and uses the defaults.
+
+The server address and password are kept apart from those, in
+`~/.config/fizz/env`, so the settings file is safe to share:
 
 ```sh
 BB_URL=http://my-mac:1234
@@ -84,8 +105,8 @@ a picture or file to open it, click a message to select it.
 Press `n` in the chat list and type a name, a phone number or an email
 address. Contacts come from the Mac's address book. If you already have a
 conversation with that person it opens; otherwise a new one is created when
-you send its first message. Ten-digit numbers are taken as US/Canada (`+1`);
-type a leading `+` for anywhere else. Only one-to-one conversations can be
+you send its first message. Numbers typed without a country code get the default one from the settings
+file (`+1` unless changed); a leading `+` is always respected. Only one-to-one conversations can be
 started.
 
 ## Pictures, video and files
@@ -107,8 +128,8 @@ clipboard (Wayland, needs `wl-clipboard`).
 ## Notifications
 
 A desktop notification appears for each new message, unless the window is
-focused and you are looking at that conversation. Set `FIZZ_NOTIFY=0` to
-turn them off.
+focused and you are looking at that conversation. Turn them off, or hide
+the message text, in the settings file.
 
 ## Colours
 
@@ -116,9 +137,10 @@ On Omarchy, fizz reads `~/.local/state/omarchy/current/theme/colors.toml`
 and notices theme changes within a second. Elsewhere it uses the terminal's
 own palette.
 
-- `FIZZ_THEME=ansi` forces terminal colours.
-- `FIZZ_THEME=/path/to/colors.toml` uses a specific Omarchy-style palette
-  (`background`, `foreground` and `accent` are enough).
+Set `theme` in the settings file to `"terminal"` to always use terminal
+colours, or to the path of an Omarchy-style `colors.toml` (`background`,
+`foreground` and `accent` are enough). The `FIZZ_THEME` environment variable
+does the same for a single run.
 
 ## App launcher entry
 

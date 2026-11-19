@@ -40,10 +40,13 @@ Usage:
   fizz            Open the app (asks for server details the first time)
   fizz setup      Enter or change the server address and password
   fizz check      Test the connection and print what was found
+  fizz config     Open the settings file in your editor
   fizz --demo     Try the interface with made-up conversations
 
-Settings live in ~/.config/fizz/env (BB_URL and BB_PASSWORD); environment
-variables of the same names override the file.
+The server address and password live in ~/.config/fizz/env (BB_URL and
+BB_PASSWORD); environment variables of the same names override the file.
+Everything else (notifications, colours, picture sizes, clock, and so on)
+is in ~/.config/fizz/config.toml, which lists every option with its default.
 
 Colours follow the current Omarchy theme when there is one, and your
 terminal's own colours otherwise. FIZZ_THEME=ansi forces the latter, and
@@ -73,6 +76,9 @@ async fn main() -> Result<()> {
     if let Some(i) = args.iter().position(|a| a == "--snapshot") {
         return snapshot(args.get(i + 1).map(String::as_str));
     }
+    if has("config") {
+        return config::edit_settings();
+    }
     if has("--demo") {
         return run(None).await;
     }
@@ -101,6 +107,13 @@ async fn main() -> Result<()> {
 
 /// Talk to the server without opening the interface.
 async fn check(config: &Config) -> Result<()> {
+    match config::settings_problem() {
+        Some(problem) => println!(
+            "Settings {} is being ignored: {problem}",
+            config::settings_path().display()
+        ),
+        None => println!("Settings {}", config::settings_path().display()),
+    }
     println!("Server   {}", config.url);
     let api = Api::new(config)?;
     let info = api.server_info().await.context("couldn't sign in")?;
@@ -133,12 +146,10 @@ async fn check(config: &Config) -> Result<()> {
 }
 
 fn enter_extras() {
-    let _ = execute!(
-        stdout(),
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        EnableFocusChange
-    );
+    let _ = execute!(stdout(), EnableBracketedPaste, EnableFocusChange);
+    if config::settings().appearance.mouse {
+        let _ = execute!(stdout(), EnableMouseCapture);
+    }
     // Lets the terminal tell Shift+Enter apart from Enter, where supported.
     let _ = execute!(
         stdout(),

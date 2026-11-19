@@ -121,18 +121,17 @@ impl Theme {
 
     /// The theme to use right now.
     pub fn load() -> Self {
-        // FIZZ_THEME=ansi forces terminal colours; a path picks a colors.toml.
-        match std::env::var("FIZZ_THEME").ok().as_deref() {
-            Some("ansi") => return Theme::ansi(),
-            Some(path) if !path.is_empty() => {
-                if let Some(t) = std::fs::read_to_string(path)
+        match choice().as_str() {
+            "auto" => {}
+            "terminal" | "ansi" => return Theme::ansi(),
+            path => {
+                if let Some(t) = std::fs::read_to_string(crate::config::expand_home(path))
                     .ok()
                     .and_then(|text| Theme::from_colors_toml(&text, "custom"))
                 {
                     return t;
                 }
             }
-            _ => {}
         }
         let Some(dir) = omarchy_current_dir() else {
             return Theme::ansi();
@@ -145,6 +144,17 @@ impl Theme {
             .and_then(|text| Theme::from_colors_toml(&text, &name))
             .unwrap_or_else(Theme::ansi)
     }
+}
+
+/// Which theme was asked for: the FIZZ_THEME variable if set, otherwise the
+/// settings file. "auto" means follow Omarchy.
+fn choice() -> String {
+    std::env::var("FIZZ_THEME")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| crate::config::settings().appearance.theme.clone())
+        .trim()
+        .to_string()
 }
 
 fn omarchy_current_dir() -> Option<PathBuf> {
@@ -165,7 +175,7 @@ fn fingerprint() -> Option<String> {
 
 /// Tell the app when the Omarchy theme changes. Does nothing elsewhere.
 pub fn watch(tx: UnboundedSender<AppEvent>) {
-    if std::env::var("FIZZ_THEME").is_ok_and(|v| !v.is_empty()) {
+    if choice() != "auto" {
         return;
     }
     tokio::spawn(async move {

@@ -142,7 +142,7 @@ impl Api {
                 "addresses": [address],
                 "message": text,
                 "tempGuid": temp_guid,
-                "method": "apple-script",
+                "method": send_method(),
             }),
         )
         .await
@@ -169,7 +169,7 @@ impl Api {
                 "chatGuid": chat,
                 "tempGuid": temp_guid,
                 "message": text,
-                "method": "apple-script",
+                "method": send_method(),
             }),
         )
         .await
@@ -196,7 +196,7 @@ impl Api {
             .text("chatGuid", chat.to_string())
             .text("tempGuid", temp_guid.to_string())
             .text("name", name)
-            .text("method", "apple-script")
+            .text("method", send_method())
             .part("attachment", part);
         let response = self
             .http
@@ -258,6 +258,11 @@ impl Api {
         }
         Ok(response.bytes().await?.to_vec())
     }
+}
+
+/// How the server should send: plain AppleScript, or the Private API.
+fn send_method() -> &'static str {
+    crate::config::settings().messages.send_method.as_str()
 }
 
 /// Explain a failed attachment download.

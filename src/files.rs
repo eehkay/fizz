@@ -148,9 +148,14 @@ pub fn open(path: impl AsRef<std::ffi::OsStr>) -> Result<()> {
 }
 
 fn downloads_dir() -> PathBuf {
-    dirs::download_dir()
-        .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
-        .unwrap_or_else(|| PathBuf::from("."))
+    let chosen = crate::config::settings().media.downloads.trim();
+    if chosen.is_empty() || chosen == "~/Downloads" {
+        // The default follows the desktop's own Downloads folder.
+        return dirs::download_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join("Downloads")))
+            .unwrap_or_else(|| PathBuf::from("."));
+    }
+    crate::config::expand_home(chosen)
 }
 
 /// `name.ext`, or `name (2).ext` and so on if that is taken.

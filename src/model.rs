@@ -317,22 +317,36 @@ pub struct ServerInfo {
     pub helper_connected: bool,
 }
 
-/// A typed or stored address in the form the server expects to send to.
-/// Ten bare digits are taken as a US/Canada number.
+/// A typed or stored address in the form the server expects to send to,
+/// using the country code from the settings for numbers typed without one.
 pub fn sendable_address(addr: &str) -> String {
+    sendable_address_in(addr, &crate::config::settings().messages.default_country_code)
+}
+
+/// As [`sendable_address`], with the default country code given.
+pub fn sendable_address_in(addr: &str, country: &str) -> String {
     let addr = addr.trim();
+    let country: String = country.chars().filter(char::is_ascii_digit).collect();
     if addr.contains('@') {
         return addr.to_lowercase();
     }
     let digits: String = addr.chars().filter(char::is_ascii_digit).collect();
     if addr.starts_with('+') {
         format!("+{digits}")
-    } else if digits.len() == 10 {
-        format!("+1{digits}")
-    } else if digits.len() == 11 && digits.starts_with('1') {
+    } else if digits.len() < 7 || country.is_empty() {
+        // Short codes, or no default to add.
+        digits
+    } else if country == "1" {
+        match digits.len() {
+            10 => format!("+1{digits}"),
+            11 if digits.starts_with('1') => format!("+{digits}"),
+            _ => digits,
+        }
+    } else if digits.starts_with(&country) && digits.len() > 10 {
         format!("+{digits}")
     } else {
-        digits
+        // National numbers are usually written with a leading 0 to drop.
+        format!("+{country}{}", digits.trim_start_matches('0'))
     }
 }
 
@@ -377,10 +391,14 @@ mod tests {
 
     #[test]
     fn makes_addresses_sendable() {
-        assert_eq!(sendable_address("(555) 010-0001"), "+15550100001");
-        assert_eq!(sendable_address("1 555 010 0001"), "+15550100001");
-        assert_eq!(sendable_address("+44 20 7946 0000"), "+442079460000");
-        assert_eq!(sendable_address(" Me@Example.com "), "me@example.com");
-        assert_eq!(sendable_address("72345"), "72345");
+        let us = |a| sendable_address_in(a, "+1");
+        assert_eq!(us("(555) 010-0001"), "+15550100001");
+        assert_eq!(us("1 555 010 0001"), "+15550100001");
+        assert_eq!(us("+44 20 7946 0000"), "+442079460000");
+        assert_eq!(us(" Me@Example.com "), "me@example.com");
+        assert_eq!(us("72345"), "72345");
+        let uk = |a| sendable_address_in(a, "+44");
+        assert_eq!(uk("020 7946 0000"), "+442079460000");
+        assert_eq!(uk("+1 555 010 0001"), "+15550100001");
     }
 }

@@ -15,10 +15,8 @@ use crate::images::ImageState;
 use crate::model::{Chat, Message};
 use crate::theme::Theme;
 
-const LIST_WIDTH: u16 = 34;
 const NARROW: u16 = 76;
 const MAX_INPUT_ROWS: u16 = 6;
-const TIMELINE_MAX: u16 = 110;
 /// Messages closer together than this share one header.
 const RUN_GAP_MS: i64 = 10 * 60_000;
 
@@ -59,7 +57,12 @@ fn local(ms: i64) -> DateTime<Local> {
 }
 
 fn clock(ms: i64) -> String {
-    local(ms).format("%-I:%M %p").to_string()
+    let format = if crate::config::settings().appearance.clock == "24h" {
+        "%H:%M"
+    } else {
+        "%-I:%M %p"
+    };
+    local(ms).format(format).to_string()
 }
 
 fn day_label(ms: i64) -> String {
@@ -117,7 +120,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     } else {
         let [l, c] =
-            Layout::horizontal([Constraint::Length(LIST_WIDTH), Constraint::Min(30)]).areas(main);
+            Layout::horizontal([
+                Constraint::Length(crate::config::settings().appearance.list_width),
+                Constraint::Min(30),
+            ])
+            .areas(main);
         (l, c)
     };
 
@@ -196,7 +203,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Pictures", "Shown inline; videos get a still frame (needs ffmpeg)"),
             ("Colours", "Follow the current Omarchy theme, live"),
             ("Notifications", "For messages in chats you are not looking at"),
-            ("Settings", "~/.config/fizz/env; see fizz --help"),
+            ("Settings", "Run: fizz config  (opens ~/.config/fizz/config.toml)"),
         ],
     ),
 ];
@@ -546,9 +553,10 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
     // On a wide window, keep the two sides of the conversation within
     // reading distance of each other instead of pinned to the far edges.
     let mut view = inner.inner(ratatui::layout::Margin::new(1, 0));
-    if view.width > TIMELINE_MAX {
-        view.x += (view.width - TIMELINE_MAX) / 2;
-        view.width = TIMELINE_MAX;
+    let widest = crate::config::settings().appearance.conversation_width;
+    if view.width > widest {
+        view.x += (view.width - widest) / 2;
+        view.width = widest;
     }
     draw_timeline(frame, app, &chat, view);
 
