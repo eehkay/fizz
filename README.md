@@ -10,18 +10,33 @@ iMessage in your terminal, through a [BlueBubbles](https://bluebubbles.app) serv
 - Follows the current [Omarchy](https://omarchy.org) theme and re-colours
   itself when you switch; uses your terminal's colours everywhere else
 
-## What you need
+## Getting started
 
-- A Mac running **BlueBubbles Server**, reachable from the machine you run
-  fizz on (same network, Tailscale, or the server's proxy URL), and its
-  server password.
-- A terminal. Pictures need one of: kitty or Ghostty (best), foot or WezTerm
-  (sixel), iTerm2. Anything else falls back to coloured blocks.
-- Rust, to build it: <https://rustup.rs>
-- Optional: `ffmpeg` (video stills), `wl-clipboard` (pasting pictures),
-  `notify-send` (notifications).
+Start to finish, this takes about ten minutes, most of it the first build.
 
-## Install
+### 1. Have a BlueBubbles server
+
+Fizz is only the screen; the messages come from a Mac running
+[BlueBubbles Server](https://bluebubbles.app), signed in to your
+iMessage account. If you already use BlueBubbles on a phone or desktop, you
+have this. You need two things from it:
+
+- **Its address,** as reachable from the computer you will run Fizz on. Any
+  of these works:
+  - a name or IP address on the same network: `http://my-mac:1234` or
+    `http://192.168.1.50:1234`
+  - its Tailscale name, which also works away from home, written the same
+    way: `http://my-mac:1234`
+  - the proxy URL shown in the server app: `https://….trycloudflare.com`
+    (this one changes whenever the server restarts)
+- **Its password,** from BlueBubbles Server > Settings.
+
+### 2. Install Rust
+
+Fizz is built from source. If `cargo --version` prints nothing, install
+Rust from <https://rustup.rs> (or `mise use -g rust` on Omarchy).
+
+### 3. Download and build Fizz
 
 ```sh
 git clone https://github.com/eehkay/fizz.git
@@ -29,18 +44,76 @@ cd fizz
 cargo install --path .
 ```
 
-The repository is private, so you need to have been invited to it and be
+The repository is private: you need to have accepted the invitation and be
 signed in to GitHub on that machine (`gh auth login` is the easy way).
-`cargo install` puts `fizz` in `~/.cargo/bin`; make sure that is on your
-`PATH`.
 
-## Use
+This puts `fizz` in `~/.cargo/bin`. If typing `fizz` afterwards says
+"command not found", add that folder to your `PATH`.
+
+### 4. Look around without a server (optional)
 
 ```sh
-fizz           # first run asks for the server address and password
+fizz --demo
+```
+
+Made-up conversations, nothing leaves your machine. Press `?` for the keys
+and `q` to quit.
+
+### 5. Connect it to your server
+
+```sh
+fizz setup
+```
+
+It asks for the address and password from step 1, saves them, and tests
+the connection straight away. You are looking for:
+
+```
+Messages ok
+Contacts 240
+Live     ok
+```
+
+If it says it can't reach the server, the address is wrong or not reachable
+from this computer; run `fizz setup` again. The contacts number is however
+many are in the Mac's address book. (To write the file by hand
+instead, see [`env.example`](env.example).)
+
+### 6. Open it
+
+```sh
+fizz
+```
+
+Your conversations load, newest first. `?` shows every key. The essentials:
+arrows to move, Enter to open a chat and type, Enter again to send, Esc to
+go back, `n` for a new conversation.
+
+Use a terminal that can show pictures to get them inline: kitty or Ghostty
+are best, foot and WezTerm work, iTerm2 works. Anything else shows coloured
+blocks instead.
+
+### 7. Make it yours (all optional)
+
+- `fizz config` opens the settings: notifications, colours, clock, picture
+  sizes and more. See [Settings](#settings).
+- Install `ffmpeg` for video stills, `wl-clipboard` to paste pictures with
+  Ctrl+V, and `notify-send` (libnotify) for notifications. Fizz works
+  without them and uses each one if it is there.
+- Add it to your app launcher and bind a key: see
+  [App launcher entry](#app-launcher-entry).
+- Tapbacks, edits and the like need the server's Private API helper: see
+  [Private API helper](#private-api-helper-optional).
+
+## Commands
+
+```sh
+fizz           # open the app (asks for server details if there are none)
+fizz setup     # enter or change the server address and password
 fizz check     # test the connection without opening the app
-fizz setup     # change the server details
-fizz --demo    # look around with made-up conversations, no server needed
+fizz config    # open the settings file in your $EDITOR
+fizz --demo    # made-up conversations, no server needed
+fizz --help    # this list, and the environment variables
 ```
 
 ## Settings
