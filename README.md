@@ -105,6 +105,18 @@ blocks instead.
 - Tapbacks, edits and the like need the server's Private API helper: see
   [Private API helper](#private-api-helper-optional).
 
+### Or let an AI assistant do it
+
+If you use Claude Code or a similar coding assistant, clone the repository,
+open the assistant in that folder and say:
+
+> Install Fizz for me following AGENTS.md, then help me connect it to my
+> BlueBubbles server.
+
+[`AGENTS.md`](AGENTS.md) tells it the steps and the ground rules: ask you
+for the server details, never send a message as a test, and keep your
+conversations private.
+
 ## Commands
 
 ```sh
