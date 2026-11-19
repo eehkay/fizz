@@ -14,6 +14,14 @@ fn main() {
         .unwrap_or_default();
     println!("cargo:rustc-env=FIZZ_COMMIT={commit}");
     println!("cargo:rustc-env=FIZZ_SOURCE={source}");
+    // Set by the release workflow: the version tag this download was built
+    // for. Empty for anything built by hand.
+    let release = std::env::var("FIZZ_RELEASE").unwrap_or_default();
+    println!("cargo:rustc-env=FIZZ_RELEASE={release}");
+    println!("cargo:rerun-if-env-changed=FIZZ_RELEASE");
+    // Which platform this is, to pick the matching download when updating.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    println!("cargo:rustc-env=FIZZ_TARGET={target}");
     // Rebuild when a commit is made or pulled, so the recorded commit is right.
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/heads");

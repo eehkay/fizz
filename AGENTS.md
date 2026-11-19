@@ -8,16 +8,25 @@ running on a Mac that the user controls; it has no service of its own.
 
 ## Installing it for someone
 
-1. Check for Rust: `cargo --version`. If it is missing, ask before
-   installing it. On Omarchy use `mise use -g rust`; elsewhere, rustup.
-2. Build and install from this repository:
+1. Decide how to install it. To just use Fizz, run the install script,
+   which downloads a prebuilt binary to `~/.local/bin` and needs no Rust:
+
+   ```sh
+   sh install.sh
+   ```
+
+   To build it instead (wanted if they mean to change the code, or if
+   there is no download for their platform), check `cargo --version`; if
+   Rust is missing, ask before installing it (`mise use -g rust` on
+   Omarchy, rustup elsewhere), then:
 
    ```sh
    cargo install --path .
    ```
 
-   This puts `fizz` in `~/.cargo/bin`. Confirm `fizz --version` runs; if
-   not, that folder is missing from `PATH`.
+   which puts `fizz` in `~/.cargo/bin`.
+2. Confirm `fizz --version` runs. If not, the folder it went to is missing
+   from `PATH`.
 3. Server details. Fizz needs the address of the user's BlueBubbles Server
    and its password. **Ask the user for both. Do not guess, scan the
    network, or search their files for them.**
@@ -44,10 +53,17 @@ running on a Mac that the user controls; it has no service of its own.
 
 ## Updating it for someone
 
-`fizz update` does everything: pulls into the clone Fizz was built from,
-rebuilds and reinstalls. `fizz update --check` only reports. The build
-records its commit and the clone's path (see `build.rs`), so the clone
-must stay where it is; if it has moved, clone again and reinstall.
+`fizz update` does everything, whichever way Fizz was installed: a script
+install downloads the new release and replaces itself; a source build pulls
+into its clone, rebuilds and reinstalls (so that clone must stay where it
+is). `fizz update --check` only reports.
+
+## Releasing a new version
+
+Bump `version` in `Cargo.toml`, commit, then push a matching tag
+(`git tag v0.2.0 && git push origin v0.2.0`). The Release workflow builds
+each platform and publishes the downloads; script installs then see the
+update banner. Do this only when the owner asks for a release.
 
 ## Rules that matter
 
@@ -86,8 +102,8 @@ must stay where it is; if it has moved, clone again and reinstall.
   - `theme.rs`: colours, including following the Omarchy theme
   - `index.rs`: the local copy of message text and searching it
   - `metrics.rs`: timings and usage for the stats screen
-  - `update.rs`: checking the repository for a newer commit, the banner's
-    source, and `fizz update`
+  - `update.rs`: finding a newer release or commit, the banner's source,
+    and `fizz update` for both kinds of install
   - `model.rs`: the server's data shapes
   - `demo.rs`: the made-up data
 - Server behaviours worth knowing before changing how data is fetched:

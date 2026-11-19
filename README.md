@@ -26,7 +26,7 @@ conversations.
 
 ## Getting started
 
-Start to finish, this takes about ten minutes, most of it the first build.
+Start to finish, this takes a few minutes.
 
 ### 1. Have a BlueBubbles server
 
@@ -45,12 +45,26 @@ have this. You need two things from it:
     (this one changes whenever the server restarts)
 - **Its password,** from BlueBubbles Server > Settings.
 
-### 2. Install Rust
+### 2. Install Fizz
 
-Fizz is built from source. If `cargo --version` prints nothing, install
-Rust from <https://rustup.rs> (or `mise use -g rust` on Omarchy).
+```sh
+curl -fsSL https://raw.githubusercontent.com/eehkay/fizz/main/install.sh | sh
+```
 
-### 3. Download and build Fizz
+That downloads a ready-made `fizz` for your computer, checks it against its
+published checksum, and puts it in `~/.local/bin`. It needs no
+administrator rights and installs nothing else. There are downloads for
+Linux (Intel/AMD and ARM) and for Apple Silicon Macs; the Mac one is built
+but has had little testing.
+
+If typing `fizz` afterwards says "command not found", add `~/.local/bin` to
+your `PATH`. To read the script before running it, it is
+[`install.sh`](install.sh) in this repository.
+
+#### From source
+
+If you would rather build it, or there is no download for your machine, you
+need Rust (<https://rustup.rs>, or `mise use -g rust` on Omarchy):
 
 ```sh
 git clone https://github.com/eehkay/fizz.git
@@ -58,10 +72,9 @@ cd fizz
 cargo install --path .
 ```
 
-This puts `fizz` in `~/.cargo/bin`. If typing `fizz` afterwards says
-"command not found", add that folder to your `PATH`.
+This puts `fizz` in `~/.cargo/bin`. The first build takes a few minutes.
 
-### 4. Look around without a server (optional)
+### 3. Look around without a server (optional)
 
 ```sh
 fizz --demo
@@ -70,7 +83,7 @@ fizz --demo
 Made-up conversations, nothing leaves your machine. Press `?` for the keys
 and `q` to quit.
 
-### 5. Connect it to your server
+### 4. Connect it to your server
 
 ```sh
 fizz setup
@@ -90,7 +103,7 @@ from this computer; run `fizz setup` again. The contacts number is however
 many are in the Mac's address book. (To write the file by hand
 instead, see [`env.example`](env.example).)
 
-### 6. Open it
+### 5. Open it
 
 ```sh
 fizz
@@ -103,7 +116,7 @@ go back, `n` for a new conversation.
 Fizz works best in kitty or Ghostty; see
 [which terminals show pictures](#which-terminals-show-pictures).
 
-### 7. Make it yours (all optional)
+### 6. Make it yours (all optional)
 
 - `fizz config` opens the settings: notifications, colours, clock, picture
   sizes and more. See [Settings](#settings).
@@ -143,20 +156,25 @@ Press `i` (or `F2` while typing) for a live panel showing:
 
 ## Updating
 
-Fizz checks now and then whether a newer version has been pushed, and shows
-a banner across the top of the app when there is one. To install it:
+Fizz checks now and then whether a newer version is out, and shows a banner
+across the top of the app when there is one. To install it:
 
 ```sh
 fizz update
 ```
 
-That pulls the new code into the folder you cloned, shows what changed,
-rebuilds and reinstalls. `fizz update --check` only looks. Then quit Fizz
-and open it again.
+Then quit Fizz and open it again. `fizz update --check` only looks.
 
-The check goes through your clone of the repository, so keep that folder
-where it is. Nothing about you
-or your messages is sent. To turn checking off, set `check = false` under
+How it updates depends on how it was installed, and it works that out
+itself:
+
+- **Installed with the script:** it downloads the new release for your
+  computer, checks it against its checksum, and replaces itself.
+- **Built from source:** it pulls the new code into the folder you cloned,
+  shows what changed, and rebuilds. Keep that folder where it is.
+
+Nothing about you or your messages is sent: the check only asks GitHub what
+the latest version is. To turn checking off, set `check = false` under
 `[updates]` in the settings.
 
 ## Commands

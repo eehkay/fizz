@@ -1,0 +1,75 @@
+name: Release
+
+# Pushing a version tag (v0.2.0) builds Fizz for each platform and publishes
+# the downloads that install.sh and `fizz update` use.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu on offer, so the result runs on older systems too.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            flags: --features vendored-tls
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            flags: --features vendored-tls
+          - os: macos-14
+            target: aarch64-apple-darwin
+            flags: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        env:
+          FIZZ_RELEASE: ${{ github.ref_name }}
+        run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.flags }}
+      - name: Check it runs
+        run: |
+          target/${{ matrix.target }}/release/fizz --version
+          target/${{ matrix.target }}/release/fizz --snapshot 100x30 > /dev/null
+      - name: Package
+        run: |
+          mkdir package
+          cp target/${{ matrix.target }}/release/fizz LICENSE README.md package/
+          tar -czf fizz-${{ matrix.target }}.tar.gz -C package .
+          shasum -a 256 fizz-${{ matrix.target }}.tar.gz > fizz-${{ matrix.target }}.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fizz-${{ matrix.target }}
+          path: |
+            fizz-${{ matrix.target }}.tar.gz
+            fizz-${{ matrix.target }}.tar.gz.sha256
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --title "Fizz ${{ github.ref_name }}" \
+            --generate-notes \
+            fizz-*.tar.gz fizz-*.tar.gz.sha256

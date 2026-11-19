@@ -79,10 +79,14 @@ async fn main() -> Result<()> {
     }
     if has("--version") || has("-V") {
         let commit = update::built_commit();
-        match commit.is_empty() {
-            true => println!("fizz {}", env!("CARGO_PKG_VERSION")),
-            false => println!("fizz {} ({})", env!("CARGO_PKG_VERSION"), update::short(&commit)),
-        }
+        let release = update::built_release();
+        let detail = match (release.is_empty(), commit.is_empty()) {
+            (false, false) => format!(" ({release} download, {})", update::short(&commit)),
+            (false, true) => format!(" ({release} download)"),
+            (true, false) => format!(" ({})", update::short(&commit)),
+            (true, true) => String::new(),
+        };
+        println!("fizz {}{detail}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     if let Some(i) = args.iter().position(|a| a == "--snapshot") {
