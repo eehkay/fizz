@@ -612,7 +612,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n", "New conversation: type a name, number or email"),
             ("D", "Delete the conversation everywhere (capital D; asks first)"),
             ("/", "Search every conversation and contact by name or number"),
-            ("G", "New group: type a name, Enter adds them; Enter on an empty line starts it"),
+            ("G", "New group: type a name, Enter adds them; then Enter on \"Start the group\""),
             ("Home  End", "Jump to the top or bottom"),
             ("r", "Refresh"),
             ("q", "Quit"),
@@ -874,13 +874,25 @@ fn draw_picker(frame: &mut Frame, app: &mut App, inner: Rect) {
         let base = Style::new().bg(bg);
         let bar = Span::styled(if is_chosen { "▌" } else { " " }, base.fg(theme.accent));
         let name = truncate(name, w.saturating_sub(4));
-        let detail = truncate(&app.pretty_address(address), w.saturating_sub(4));
+        let finish = address == crate::app::START_GROUP;
+        let detail = if finish {
+            let who: Vec<&str> = app
+                .pick_chosen
+                .iter()
+                .map(|(n, _)| n.split_whitespace().next().unwrap_or(n))
+                .collect();
+            format!("with {}", who.join(", "))
+        } else {
+            app.pretty_address(address)
+        };
+        let detail = truncate(&detail, w.saturating_sub(4));
         let lines = [
             Line::from(vec![
                 bar.clone(),
                 Span::styled(
                     format!("  {name}{}", pad(w.saturating_sub(3 + width(&name)))),
-                    base.fg(theme.bright).add_modifier(Modifier::BOLD),
+                    base.fg(if finish { theme.accent } else { theme.bright })
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
@@ -1708,7 +1720,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.reacting.is_some() {
         &[("←→", "choose"), ("1-6", "pick"), ("⏎", "send"), ("esc", "cancel")]
     } else if app.picking.is_some() && app.pick_group {
-        &[("type", "a name"), ("⏎", "add them"), ("⏎ on empty line", "start group"), ("⌫", "remove"), ("esc", "cancel")]
+        &[("type", "a name"), ("↑↓", "choose"), ("⏎", "add, or start the group"), ("⌫", "remove last"), ("esc", "cancel")]
     } else if app.picking.is_some() {
         &[("type", "name or number"), ("↑↓", "choose"), ("tab", "add another"), ("⏎", "start"), ("esc", "cancel")]
     } else if app.focus == Focus::List {

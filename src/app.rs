@@ -29,6 +29,10 @@ use crate::theme::Theme;
 /// The largest box, in terminal cells, a picture may take in the timeline.
 
 
+/// The picker row that finishes a group, told apart from a person by this
+/// in place of an address.
+pub const START_GROUP: &str = "\u{1}start-group";
+
 /// How many of the newest messages to scan per step when building the list.
 const SCAN_PAGE: usize = 400;
 const MESSAGE_PAGE: usize = 50;
@@ -1423,6 +1427,13 @@ impl App {
                 found.insert(0, (format!("Send to {address}"), address));
             }
         }
+        // People already in the group are not offered again.
+        found.retain(|(_, address)| !self.pick_chosen.iter().any(|(_, a)| a == address));
+        // Once a group has two people and nothing is being typed, the first
+        // row is the way to finish, so Enter's meaning is never a guess.
+        if self.pick_group && needle.is_empty() && self.pick_chosen.len() >= 2 {
+            found.insert(0, ("Start the group".to_string(), START_GROUP.to_string()));
+        }
         found
     }
 
@@ -2610,20 +2621,27 @@ impl App {
             KeyCode::Tab => self.pick_add(),
             // Choosing a group: Enter adds whoever was searched for, and on
             // an empty line starts the group with everyone added so far.
+            // Choosing a group: Enter acts on the highlighted row, which is
+            // either a person to add or "Start the group".
             KeyCode::Enter if self.pick_group => {
-                let typed = self.picking.as_deref().is_some_and(|q| !q.trim().is_empty());
-                if typed {
-                    self.pick_add();
-                } else {
-                    let everyone: Vec<String> =
-                        self.pick_chosen.iter().map(|(_, a)| a.clone()).collect();
-                    match everyone.len() {
-                        0 => self.set_status("Type a name and press Enter to add them".into()),
-                        1 => self.set_status(
-                            "A group needs at least two people: add another, or Esc and press n".into(),
-                        ),
-                        _ => self.start_group(everyone),
+                let highlighted = self
+                    .pick_candidates()
+                    .get(self.pick_index.min(count.saturating_sub(1)))
+                    .map(|(_, address)| address.clone());
+                match highlighted.as_deref() {
+                    Some(START_GROUP) => {
+                        let everyone = self.pick_chosen.iter().map(|(_, a)| a.clone()).collect();
+                        self.start_group(everyone);
                     }
+                    Some(_) => {
+                        self.pick_add();
+                        if self.pick_chosen.len() == 1 {
+                            self.set_status("Added. Add at least one more person".into());
+                        } else {
+                            self.status = None;
+                        }
+                    }
+                    None => self.set_status("No contact matches that".into()),
                 }
             }
             KeyCode::Enter => {

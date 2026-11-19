@@ -250,8 +250,10 @@ create a chat with the Private API helper connected (see below). Numbers typed w
 file (`+1` unless changed); a leading `+` is always respected.
 
 For a group, press `G` (capital) instead. Type a name and press Enter to add
-that person, repeat for each one, then press Enter on an empty line to start
-the conversation. Backspace on an empty line removes the last person added.
+that person, and repeat for each one. Once there are two, a "Start the
+group" row appears at the top of the list whenever nothing is typed: press
+Enter on it, then write the first message, which is what creates the group.
+Backspace on an empty line removes the last person added.
 Creating a group needs the server's Private API helper.
 
 ## Pictures, video and files
