@@ -21,6 +21,7 @@ conversations.
 - Open or save any attachment, copy message text, open links
 - Search every conversation and contact by name, and messages by their words
 - New messages arrive live, with desktop notifications
+- One-time codes are picked out of messages, ready to copy
 - Follows the current [Omarchy](https://omarchy.org) theme and re-colours
   itself when you switch; uses your terminal's colours everywhere else
 
@@ -201,6 +202,8 @@ its default written out, each with a comment. It covers:
 
 - **Updates:** whether to check for new versions, and how often
 - **Search:** how many years of message text to keep for word search
+- **Codes:** whether to pick out one-time codes, and whether to copy them
+  automatically
 - **Notifications:** on or off, whether they show the message text, and an
   optional sound
 - **Appearance:** theme (`auto`, `terminal`, or a `colors.toml` path), 12 or
@@ -252,11 +255,13 @@ The essentials:
 |              | `Enter`                     | Open the picture, video, file, or the link in a message |
 |              | `s`                         | Save to `~/Downloads`        |
 |              | `c`                         | Copy the message's text (`y` works too) |
+|              | `C`                         | Copy just the one-time code in it (capital C) |
 |              | `R`                         | Reply to that message (capital R; helper) |
 |              | `r`                         | React with a tapback (needs the Private API helper) |
 |              | `e`                         | Edit a message you sent (helper; within about 15 minutes) |
 |              | `u`                         | Unsend a message you sent (helper; within about 2 minutes) |
 | Anywhere     | `?` / `F1`                  | Help                         |
+|              | `Ctrl+Y`                    | Copy the latest one-time code that arrived |
 |              | `i` / `F2`                  | Stats (see below)            |
 |              | `Ctrl+C`                    | Quit                         |
 
@@ -346,6 +351,25 @@ conversation is open. They appear above the message box; Enter sends them,
 followed by whatever you typed. This works in any terminal that pastes the
 path of a dropped file, which most do. `Ctrl+V` attaches a picture from the
 clipboard (Wayland, needs `wl-clipboard`).
+
+## One-time codes
+
+When a message arrives that reads like a verification code ("Your code is
+482913"), Fizz picks the code out:
+
+- the desktop notification leads with the code, so you can read it off
+  without opening anything
+- `Ctrl+Y`, from anywhere in Fizz, copies the most recent one
+- in the conversation it is shown beneath the message; select the message
+  and press `C` (capital) to copy just the code
+
+To have codes copied to the clipboard the moment they arrive, set
+`auto_copy = true` under `[codes]` in the settings. It is off by default
+because it replaces whatever you had copied. `detect = false` turns the
+whole thing off.
+
+It looks for digit codes (4 to 8 digits, including forms like `123 456` and
+`G-123456`) in messages that mention a code, and stays quiet when unsure.
 
 ## When a message fails to send
 

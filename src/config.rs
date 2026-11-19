@@ -228,6 +228,24 @@ impl Default for Updates {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Codes {
+    /// Pick one-time codes out of incoming messages.
+    pub detect: bool,
+    /// Put a code on the clipboard the moment it arrives.
+    pub auto_copy: bool,
+}
+
+impl Default for Codes {
+    fn default() -> Self {
+        Codes {
+            detect: true,
+            auto_copy: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Search {
@@ -241,6 +259,7 @@ pub struct Search {
 pub struct Settings {
     pub updates: Updates,
     pub search: Search,
+    pub codes: Codes,
     pub notifications: Notifications,
     pub appearance: Appearance,
     pub media: Media,
@@ -317,6 +336,15 @@ every_hours = 6
 # only recent history, set a number of years here; 0 keeps everything.
 # See what it is using with: fizz index      Remove it: fizz index delete
 years = 0
+
+[codes]
+# Spot one-time codes ("Your verification code is 482913") in messages that
+# arrive. The code leads the notification, and Ctrl+Y copies the latest one.
+detect = true
+# Copy a code to the clipboard by itself the moment it arrives. Off by
+# default because it replaces whatever you had copied, and clipboard
+# managers keep a history.
+auto_copy = false
 
 [notifications]
 # Desktop notifications for new messages in chats you are not looking at.

@@ -912,6 +912,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Enter", "Open the picture, video or file, or the link in a message"),
             ("s", "Save the picture or file to Downloads"),
             ("c", "Copy the message's text (y works too)"),
+            ("C", "Copy just the one-time code in the message (capital C)"),
             ("R", "Reply to that message (capital R, or a)"),
             ("r", "React: pick a tapback (needs the server's Private API helper)"),
             ("e", "Edit a message you sent (within about 15 minutes)"),
@@ -933,6 +934,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("?  or  F1", "This help (F1 while typing)"),
             ("i  or  F2", "Stats: latency, connection, CPU and memory, and details of the selected message"),
+            ("Ctrl+Y", "Copy the latest one-time code that arrived"),
             ("Ctrl+C", "Quit"),
         ],
     ),
@@ -1903,6 +1905,18 @@ fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
                     items.push(tagged(key.clone(), line, inner, *style));
                 }
             }
+        }
+
+        // A one-time code in a message we received, picked out beneath it.
+        if !mine
+            && crate::config::settings().codes.detect
+            && let Some(code) = crate::codes::find(&message.body())
+        {
+            items.push(Item::Line(Line::from(vec![
+                Span::styled(" Code ", muted),
+                Span::styled(code, Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)),
+                Span::styled("  ·  C copies it when selected", muted),
+            ])));
         }
 
         if message.date_edited.is_some() && message.date_retracted.is_none() {

@@ -273,6 +273,9 @@ pub struct App {
     notify: bool,
     notified: HashSet<String>,
     last_sound: Option<Instant>,
+    /// The most recent one-time code to arrive, and when.
+    last_code: Option<(String, Instant)>,
+    codes_seen: HashSet<String>,
     started_ms: i64,
     can_make_stills: bool,
 
@@ -403,6 +406,8 @@ impl App {
             ),
             notified: HashSet::new(),
             last_sound: None,
+            last_code: None,
+            codes_seen: HashSet::new(),
             started_ms: chrono::Utc::now().timestamp_millis(),
             can_make_stills: false,
             cursor: None,
@@ -1828,6 +1833,67 @@ impl App {
 
     // ----- notifications -------------------------------------------------
 
+    /// If a message that just arrived carries a one-time code, keep it at
+    /// hand: say so, remember it for Ctrl+Y, and copy it if asked to.
+    fn note_code(&mut self, message: &Message) {
+        let settings = &crate::config::settings().codes;
+        if !settings.detect
+            || message.is_from_me
+            || message.date_created < self.started_ms - 10_000
+            || !self.codes_seen.insert(message.guid.clone())
+        {
+            return;
+        }
+        let Some(code) = crate::codes::find(&message.body()) else {
+            return;
+        };
+        let from = message
+            .handle
+            .as_ref()
+            .map_or("someone".to_string(), |h| self.name_for(&h.address));
+        let copied = settings.auto_copy && files::copy_text(&code).is_ok();
+        self.set_status(if copied {
+            format!("Code {code} from {from} copied")
+        } else {
+            format!("Code {code} from {from} · Ctrl+Y copies it")
+        });
+        // A code is wanted for longer than an ordinary status line lasts.
+        if let Some((_, at)) = &mut self.status {
+            *at = Instant::now() + Duration::from_secs(40);
+        }
+        self.last_code = Some((code, Instant::now()));
+    }
+
+    /// Ctrl+Y: copy the most recent code, while it could still be valid.
+    fn copy_last_code(&mut self) {
+        let recent = self
+            .last_code
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(15 * 60))
+            .map(|(code, _)| code.clone());
+        match recent {
+            Some(code) => match files::copy_text(&code) {
+                Ok(()) => self.set_status(format!("Copied {code}")),
+                Err(e) => self.set_status(format!("Couldn't copy: {e:#}")),
+            },
+            None => self.set_status("No code has arrived in the last 15 minutes".into()),
+        }
+    }
+
+    /// Capital C on a selected message: copy just the code in it.
+    fn copy_selected_code(&mut self) {
+        let code = self
+            .selected_message()
+            .and_then(|(m, _)| crate::codes::find(&m.body()));
+        match code {
+            Some(code) => match files::copy_text(&code) {
+                Ok(()) => self.set_status(format!("Copied {code}")),
+                Err(e) => self.set_status(format!("Couldn't copy: {e:#}")),
+            },
+            None => self.set_status("No code in this message (c copies its text)".into()),
+        }
+    }
+
     /// A desktop notification for a message that just arrived, unless you
     /// are looking at that conversation right now.
     fn maybe_notify(&mut self, message: &Message) {
@@ -1856,10 +1922,16 @@ impl App {
             Some(chat) if chat.is_group() => format!("{sender} · {}", self.chat_title(chat)),
             _ => sender,
         };
-        let body = if crate::config::settings().notifications.preview {
-            message.summary()
-        } else {
-            "New message".to_string()
+        let code = crate::config::settings()
+            .codes
+            .detect
+            .then(|| crate::codes::find(&message.body()))
+            .flatten();
+        let body = match (crate::config::settings().notifications.preview, code) {
+            // Lead with the code, so it can be read off the notification.
+            (true, Some(code)) => format!("{code}  ·  {}", message.summary()),
+            (true, None) => message.summary(),
+            (false, _) => "New message".to_string(),
         };
         if self.notify {
             files::notify(&title, &body);
@@ -2357,6 +2429,7 @@ impl App {
                     if let Some(index) = &self.index_tx {
                         let _ = index.send(message.clone());
                     }
+                    self.note_code(&message);
                     self.maybe_notify(&message);
                     self.on_incoming(message);
                 }
@@ -2751,6 +2824,9 @@ impl App {
             self.help_scroll = 0;
             return;
         }
+        if ctrl && key.code == KeyCode::Char('y') {
+            return self.copy_last_code();
+        }
         // Stats: F2 anywhere, `i` wherever it would not be typed as text.
         if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('i') && !typing && !self.help) {
             return self.toggle_stats();
@@ -2962,6 +3038,7 @@ impl App {
                 KeyCode::Enter | KeyCode::Char('o') => self.open_selected(),
                 KeyCode::Char('s') => self.save_selected(),
                 KeyCode::Char('y') | KeyCode::Char('c') => self.copy_selected(),
+                KeyCode::Char('C') => self.copy_selected_code(),
                 KeyCode::Char('r') => self.start_reacting(),
                 KeyCode::Char('R') | KeyCode::Char('a') => self.start_replying(),
                 KeyCode::Char('u') => self.start_unsending(),

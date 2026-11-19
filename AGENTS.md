@@ -100,6 +100,7 @@ update banner. Do this only when the owner asks for a release.
     opening, saving, attaching, clipboard, notifications
   - `config.rs`: server details and the settings file
   - `theme.rs`: colours, including following the Omarchy theme
+  - `codes.rs`: spotting one-time codes in message text
   - `index.rs`: the local copy of message text and searching it
   - `metrics.rs`: timings and usage for the stats screen
   - `update.rs`: finding a newer release or commit, the banner's source,

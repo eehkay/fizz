@@ -191,6 +191,14 @@ pub fn data() -> (
         .say(48 * HOUR, None, "Thursday works");
     convos.push((vec![dana], None, b));
 
+    let mut b = Builder::new("demo;-;code");
+    b.say(
+        6 * HOUR,
+        Some("32665"),
+        "482913 is your Trailhead verification code. It expires in 10 minutes.",
+    );
+    convos.push((vec!["32665"], None, b));
+
     let mut chats = Vec::new();
     let mut by_chat = HashMap::new();
     for (participants, name, builder) in convos {

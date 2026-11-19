@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod codes;
 mod config;
 mod demo;
 mod emoji;
