@@ -118,6 +118,24 @@ open the assistant in that folder and say:
 for the server details, never send a message as a test, and keep your
 conversations private.
 
+## Updating
+
+Fizz checks now and then whether a newer version has been pushed, and shows
+a banner across the top of the app when there is one. To install it:
+
+```sh
+fizz update
+```
+
+That pulls the new code into the folder you cloned, shows what changed,
+rebuilds and reinstalls. `fizz update --check` only looks. Then quit Fizz
+and open it again.
+
+The check goes through your clone of the repository, using the GitHub
+sign-in it already has, so keep that folder where it is. Nothing about you
+or your messages is sent. To turn checking off, set `check = false` under
+`[updates]` in the settings.
+
 ## Commands
 
 ```sh
@@ -125,6 +143,7 @@ fizz           # open the app (asks for server details if there are none)
 fizz setup     # enter or change the server address and password
 fizz check     # test the connection without opening the app
 fizz config    # open the settings file in your $EDITOR
+fizz update    # install the newest version (--check only looks)
 fizz --demo    # made-up conversations, no server needed
 fizz --help    # this list, and the environment variables
 ```
@@ -138,6 +157,7 @@ fizz config     # opens the settings file in your $EDITOR
 `~/.config/fizz/config.toml` is created on first run with every option and
 its default written out, each with a comment. It covers:
 
+- **Updates:** whether to check for new versions, and how often
 - **Notifications:** on or off, whether they show the message text, and an
   optional sound
 - **Appearance:** theme (`auto`, `terminal`, or a `colors.toml` path), 12 or

@@ -11,6 +11,7 @@ mod input;
 mod live;
 mod model;
 mod theme;
+mod update;
 mod ui;
 
 use anyhow::{Context, Result};
@@ -41,6 +42,7 @@ Usage:
   fizz setup      Enter or change the server address and password
   fizz check      Test the connection and print what was found
   fizz config     Open the settings file in your editor
+  fizz update     Install the newest version (--check only looks)
   fizz sound      Play the notification sound
   fizz --demo     Try the interface with made-up conversations
 
@@ -71,7 +73,11 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if has("--version") || has("-V") {
-        println!("fizz {}", env!("CARGO_PKG_VERSION"));
+        let commit = update::built_commit();
+        match commit.is_empty() {
+            true => println!("fizz {}", env!("CARGO_PKG_VERSION")),
+            false => println!("fizz {} ({})", env!("CARGO_PKG_VERSION"), update::short(&commit)),
+        }
         return Ok(());
     }
     if let Some(i) = args.iter().position(|a| a == "--snapshot") {
@@ -79,6 +85,9 @@ async fn main() -> Result<()> {
     }
     if has("config") {
         return config::edit_settings();
+    }
+    if has("update") {
+        return update::update(has("--check")).await;
     }
     if has("sound") {
         // Play the notification sound, to hear it or check it works.
@@ -220,6 +229,7 @@ async fn event_loop(
 ) -> Result<()> {
     let (tx, mut rx) = unbounded_channel();
     let mut app = App::new(api.clone(), tx.clone(), picker);
+    let app_is_live = api.is_some() || std::env::var("FIZZ_COMMIT_OVERRIDE").is_ok();
     match (api, config) {
         (Some(api), Some(config)) => {
             app.start();
@@ -227,7 +237,10 @@ async fn event_loop(
         }
         _ => app.load_demo(),
     }
-    theme::watch(tx);
+    theme::watch(tx.clone());
+    if app_is_live {
+        update::watch(tx);
+    }
 
     let mut keys = EventStream::new();
     while !app.quit {

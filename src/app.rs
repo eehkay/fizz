@@ -40,6 +40,8 @@ pub enum AppEvent {
     ChatDetail(Chat),
     /// Whether the server's Private API helper is connected.
     Helper(bool),
+    /// The result of an update check: the newer commit, if there is one.
+    Update(Option<String>),
     /// A tapback we sent has been accepted (or refused).
     Reacted {
         chat: String,
@@ -218,6 +220,8 @@ pub struct App {
     pub convos: HashMap<String, Convo>,
     pub images: HashMap<String, ImageState>,
     pub focus: Focus,
+    /// A newer version's commit, when one has been pushed.
+    pub update: Option<String>,
     /// The tapback picker, and which of the six is highlighted.
     pub reacting: Option<usize>,
     /// The attachment highlighted while browsing.
@@ -297,6 +301,7 @@ impl App {
             convos: HashMap::new(),
             images: HashMap::new(),
             focus: Focus::List,
+            update: None,
             reacting: None,
             selected: None,
             reveal: false,
@@ -1328,6 +1333,7 @@ impl App {
                     self.refresh_search();
                 }
             }
+            AppEvent::Update(found) => self.update = found,
             AppEvent::Helper(connected) => {
                 self.helper = connected;
                 // Catch up the chat that was opened before we knew.

@@ -39,6 +39,13 @@ running on a Mac that the user controls; it has no service of its own.
    goes in `~/.config/hypr/bindings.lua`; the README has the line. Check
    the key is free first and back the file up.
 
+## Updating it for someone
+
+`fizz update` does everything: pulls into the clone Fizz was built from,
+rebuilds and reinstalls. `fizz update --check` only reports. The build
+records its commit and the clone's path (see `build.rs`), so the clone
+must stay where it is; if it has moved, clone again and reinstall.
+
 ## Rules that matter
 
 - **Never send a message to test something.** Sending reaches real people
@@ -70,6 +77,8 @@ running on a Mac that the user controls; it has no service of its own.
     opening, saving, attaching, clipboard, notifications
   - `config.rs`: server details and the settings file
   - `theme.rs`: colours, including following the Omarchy theme
+  - `update.rs`: checking the repository for a newer commit, the banner's
+    source, and `fizz update`
   - `model.rs`: the server's data shapes
   - `demo.rs`: the made-up data
 - Server behaviours worth knowing before changing how data is fetched:

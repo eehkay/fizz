@@ -112,6 +112,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, status] =
         Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(frame.area());
 
+    // A newer version has been pushed: say so across the top.
+    let main = if app.update.is_some() && main.height > 8 {
+        let [banner, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(3)]).areas(main);
+        let text = " ↑ A newer Fizz is available. Quit and run:  fizz update ";
+        let style = Style::new()
+            .fg(app.theme.on_accent)
+            .bg(app.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let line = Line::styled(
+            format!("{}{}", truncate(text, usize::from(banner.width)), pad(usize::from(banner.width))),
+            style,
+        );
+        frame.render_widget(line, banner);
+        rest
+    } else {
+        main
+    };
+
     let narrow = main.width < NARROW;
     let (list_area, convo_area) = if narrow {
         match app.focus {
@@ -286,6 +305,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Colours", "Follow the current Omarchy theme, live"),
             ("Notifications", "For messages in chats you are not looking at; a sound is optional"),
             ("Settings", "Run: fizz config  (opens ~/.config/fizz/config.toml)"),
+            ("Updates", "A banner appears when there is a new version; fizz update installs it"),
         ],
     ),
 ];

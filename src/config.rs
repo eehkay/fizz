@@ -209,9 +209,27 @@ pub struct Messages {
     pub mark_read: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Updates {
+    /// Look for a newer version in the background.
+    pub check: bool,
+    pub every_hours: u64,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Updates {
+            check: true,
+            every_hours: 6,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    pub updates: Updates,
     pub notifications: Notifications,
     pub appearance: Appearance,
     pub media: Media,
@@ -272,6 +290,13 @@ pub const SETTINGS_TEMPLATE: &str = r#"# Fizz settings.
 # Change a value and restart Fizz. Delete a line to go back to its default.
 # The server address and password are kept separately, in the "env" file
 # next to this one (change them with: fizz setup).
+
+[updates]
+# Look for a newer Fizz now and then, and show a banner when there is one.
+# It asks the repository Fizz was installed from; nothing else is sent.
+# Install an update with: fizz update
+check = true
+every_hours = 6
 
 [notifications]
 # Desktop notifications for new messages in chats you are not looking at.
