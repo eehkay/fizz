@@ -964,14 +964,14 @@ impl App {
                 Ok(()) => self.set_status(format!("Opened {link}")),
                 Err(e) => self.set_status(format!("{e:#}")),
             },
-            None => self.set_status("No link in this message (y copies its text)".into()),
+            None => self.set_status("No link in this message (c copies its text)".into()),
         }
     }
 
     fn save_selected(&mut self) {
         match self.selected.clone() {
             Some(key) if !key.starts_with("text:") => self.act_on(&key, Then::Save),
-            Some(_) => self.set_status("Only pictures and files can be saved (y copies text)".into()),
+            Some(_) => self.set_status("Only pictures and files can be saved (c copies text)".into()),
             None => {}
         }
     }

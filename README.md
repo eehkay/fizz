@@ -184,7 +184,7 @@ The essentials:
 | Selecting    | `↑` `↓`                     | Move between messages, pictures, files |
 |              | `Enter`                     | Open the picture, video, file, or the link in a message |
 |              | `s`                         | Save to `~/Downloads`        |
-|              | `y`                         | Copy the message's text      |
+|              | `c`                         | Copy the message's text (`y` works too) |
 |              | `r`                         | React with a tapback (needs the Private API helper) |
 | Anywhere     | `?` / `F1`                  | Help                         |
 |              | `Ctrl+C`                    | Quit                         |

@@ -258,7 +258,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("↑ ↓  or  j k", "Move between messages, pictures and files"),
             ("Enter", "Open the picture, video or file, or the link in a message"),
             ("s", "Save the picture or file to Downloads"),
-            ("y", "Copy the message's text"),
+            ("c", "Copy the message's text (y works too)"),
             ("r", "React: pick a tapback (needs the server's Private API helper)"),
             ("Esc", "Back to typing"),
         ],
@@ -1249,7 +1249,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.picking.is_some() {
         &[("type", "name or number"), ("↑↓", "choose"), ("⏎", "start"), ("esc", "cancel")]
     } else if app.focus == Focus::Browse && app.selected_text().is_some() {
-        &[("↑↓", "select"), ("r", "react"), ("y", "copy"), ("⏎", "open link"), ("?", "help"), ("esc", "back")]
+        &[("↑↓", "select"), ("r", "react"), ("c", "copy"), ("⏎", "open link"), ("?", "help"), ("esc", "back")]
     } else if app.focus == Focus::Browse {
         &[("↑↓", "select"), ("r", "react"), ("⏎", "open"), ("s", "save"), ("?", "help"), ("esc", "back")]
     } else if !app.emoji_matches().is_empty() {
