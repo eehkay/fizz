@@ -6,6 +6,15 @@ iMessage in your terminal, through a [BlueBubbles](https://bluebubbles.app) serv
 [Ghostty](https://ghostty.org),** where pictures show inline as real pixels.
 It runs in any terminal; see [which ones show pictures](#which-terminals-show-pictures).
 
+![Fizz showing a conversation with an inline photo, a link with its title, and a reply](docs/main.png)
+
+| Search conversations and message text | Every key, on `?` |
+| --- | --- |
+| ![The search layer listing a matching conversation and messages with the match highlighted](docs/search.png) | ![The help screen listing keys by area](docs/help.png) |
+
+These are the built-in demo (`fizz --demo`), which uses made-up
+conversations.
+
 - Conversations, contact names, tapbacks, group chats, replies, link titles
 - Photos shown inline as real pixels, and a still frame for videos
 - Start new conversations, send text, files and pictures, insert emoji

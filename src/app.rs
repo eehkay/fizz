@@ -689,6 +689,30 @@ impl App {
         self.search_index = 0;
         self.search_generation += 1;
         let query = self.filter.trim().to_string();
+        if query.chars().count() >= 2 && self.api.is_none() {
+            // The demo searches its own made-up conversations.
+            let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+            let mut found: Vec<crate::index::Hit> = self
+                .convos
+                .iter()
+                .flat_map(|(chat, convo)| convo.messages.iter().map(move |m| (chat, m)))
+                .filter(|(_, m)| {
+                    let text = m.body().to_lowercase();
+                    !text.is_empty() && words.iter().all(|w| text.contains(w.as_str()))
+                })
+                .map(|(chat, m)| crate::index::Hit {
+                    chat: chat.clone(),
+                    guid: m.guid.clone(),
+                    date: m.date_created,
+                    from_me: m.is_from_me,
+                    sender: m.handle.as_ref().map_or(String::new(), |h| h.address.clone()),
+                    text: m.body(),
+                })
+                .collect();
+            found.sort_by_key(|h| std::cmp::Reverse(h.date));
+            self.found = found;
+            return;
+        }
         if query.chars().count() < 2 || !crate::index::enabled() {
             self.found.clear();
             return;
@@ -1012,6 +1036,14 @@ impl App {
     /// Open a conversation at one message from its past, loading the
     /// history on both sides of it.
     pub fn open_at(&mut self, chat: &str, message: &str, date: i64) {
+        if self.api.is_none() {
+            // The demo holds whole conversations already: just go there.
+            self.open_chat(chat);
+            self.selected = Some(format!("text:{message}"));
+            self.focus = Focus::Browse;
+            self.reveal = true;
+            return;
+        }
         // Mark it loading first, so opening does not also fetch the latest.
         self.convos.insert(
             chat.to_string(),

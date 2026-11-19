@@ -459,6 +459,9 @@ fn draw_search(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // What the message-text search can and cannot see right now.
     let status = match (&app.indexing, crate::index::enabled()) {
+        _ if app.server_address().is_none() => {
+            "Searching the demo's made-up conversations.".to_string()
+        }
         (_, false) => "Only names are searched. Ctrl+B also searches message text, by keeping a copy of it on this computer.".to_string(),
         (Some(p), true) if p.complete => format!("Message text: all {} messages are searchable.", p.stored),
         (Some(p), true) => match p.percent() {
