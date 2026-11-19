@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Fizz
+GenericName=Messages
+Comment=iMessage in the terminal, through a BlueBubbles server
+Exec=xdg-terminal-exec --app-id=org.omarchy.fizz -e fizz
+Icon=fizz
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=imessage;bluebubbles;sms;chat;texting;
+StartupNotify=true
+StartupWMClass=org.omarchy.fizz
