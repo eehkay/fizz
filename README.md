@@ -2,6 +2,10 @@
 
 iMessage in your terminal, through a [BlueBubbles](https://bluebubbles.app) server.
 
+**Works best in [kitty](https://sw.kovidgoyal.net/kitty/) or
+[Ghostty](https://ghostty.org),** where pictures show inline as real pixels.
+It runs in any terminal; see [which ones show pictures](#which-terminals-show-pictures).
+
 - Conversations, contact names, tapbacks, group chats, replies, link titles
 - Photos shown inline as real pixels, and a still frame for videos
 - Start new conversations, send text, files and pictures, insert emoji
@@ -87,9 +91,8 @@ Your conversations load, newest first. `?` shows every key. The essentials:
 arrows to move, Enter to open a chat and type, Enter again to send, Esc to
 go back, `n` for a new conversation.
 
-Use a terminal that can show pictures to get them inline: kitty or Ghostty
-are best, foot and WezTerm work, iTerm2 works. Anything else shows coloured
-blocks instead.
+Fizz works best in kitty or Ghostty; see
+[which terminals show pictures](#which-terminals-show-pictures).
 
 ### 7. Make it yours (all optional)
 
@@ -263,6 +266,24 @@ Pictures show inline. Videos up to 40 MB show a still frame (needs
 Opening one hands it to whatever app your desktop uses for that type (via
 `xdg-open`, or `open` on macOS). HEIC pictures arrive already converted to
 JPEG, so any viewer can show them.
+
+### Which terminals show pictures
+
+Drawing real pixels is up to the terminal, so this is the one thing that
+differs from one to the next. Fizz picks the best method available by
+itself; there is nothing to configure.
+
+| Terminal | Pictures |
+| --- | --- |
+| kitty, Ghostty | Real pictures, best quality. **Recommended.** |
+| foot, WezTerm | Real pictures (sixel) |
+| iTerm2 | Real pictures |
+| Alacritty and most others | Coarse coloured blocks |
+| Anything, inside tmux | Coarse coloured blocks |
+
+`fizz check` says which of these you have. Where pictures are blocks, Enter
+on one still opens the real thing in your image viewer. Fizz does not
+install a terminal for you.
 
 ## Sending files
 

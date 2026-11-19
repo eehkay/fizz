@@ -2245,6 +2245,34 @@ impl App {
         }
     }
 
+    /// The first time Fizz starts somewhere that cannot draw real pictures,
+    /// say so, and say where it would look better. Once only: after that
+    /// the stats screen and `fizz check` still tell you.
+    pub fn hint_about_terminal(&mut self) {
+        use ratatui_image::picker::ProtocolType;
+        if self.picker.protocol_type() != ProtocolType::Halfblocks {
+            return;
+        }
+        let marker = crate::config::state_dir().join("terminal-hint-shown");
+        if marker.exists() {
+            return;
+        }
+        let inside_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
+        self.set_status(if inside_tmux {
+            "Pictures show as blocks inside tmux. Fizz works best in kitty or Ghostty, outside tmux".into()
+        } else {
+            "Pictures show as blocks in this terminal. Fizz works best in kitty or Ghostty".into()
+        });
+        // Keep it up a little longer than an ordinary status line.
+        if let Some((_, at)) = &mut self.status {
+            *at = Instant::now() + Duration::from_secs(8);
+        }
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&marker, "");
+    }
+
     // ----- stats ---------------------------------------------------------
 
     pub fn metrics(&self) -> Option<metrics::Shared> {

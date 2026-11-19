@@ -668,7 +668,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "Good to know",
         &[
-            ("Pictures", "Shown inline; videos get a still frame (needs ffmpeg)"),
+            ("Pictures", "Shown inline in kitty and Ghostty (best), foot, WezTerm and iTerm2; coloured blocks elsewhere"),
+            ("Videos", "Get a still frame, if ffmpeg is installed"),
             ("Colours", "Follow the current Omarchy theme, live"),
             ("Notifications", "For messages in chats you are not looking at; a sound is optional"),
             ("Settings", "Run: fizz config  (opens ~/.config/fizz/config.toml)"),

@@ -30,6 +30,9 @@ running on a Mac that the user controls; it has no service of its own.
 4. Verify with `fizz check`. Success prints `Messages ok` and `Live ok`.
    "can't reach the server" means the address is wrong or unreachable from
    this machine, not that Fizz is broken.
+   `fizz check` also reports whether this terminal can show pictures.
+   Fizz works best in kitty or Ghostty; in other terminals pictures show as
+   coloured blocks. Mention that, but do not install a terminal unasked.
 5. Optional extras, used only if present: `ffmpeg` (video stills),
    `wl-clipboard` (pasting pictures), `notify-send` from libnotify
    (notifications). Offer them; do not install without asking.

@@ -56,9 +56,10 @@ Colours follow the current Omarchy theme when there is one, and your
 terminal's own colours otherwise. FIZZ_THEME=ansi forces the latter, and
 FIZZ_THEME=/path/to/colors.toml uses a specific palette.
 
-Pictures show inline in terminals that support the kitty graphics protocol
-(kitty, Ghostty), sixel (foot, WezTerm) or iTerm2 images. Inside tmux they
-show as coloured blocks.
+Fizz works best in kitty or Ghostty. Pictures show inline in terminals that
+support the kitty graphics protocol (kitty, Ghostty), sixel (foot, WezTerm)
+or iTerm2 images; in other terminals, and inside tmux, they show as coloured
+blocks. Everything else works anywhere.
 
 Inside the app, press ? (or F1 while typing) for a list of every key.
 
@@ -168,7 +169,27 @@ async fn check(config: &Config) -> Result<()> {
         Err(_) => println!("Live     timed out; falling back to polling"),
     }
     println!("Theme    {}", theme::Theme::load().name);
+    println!("Pictures {}", picture_support());
     Ok(())
+}
+
+/// What this terminal can do with pictures, in a sentence.
+fn picture_support() -> String {
+    use ratatui_image::picker::ProtocolType;
+    use std::io::IsTerminal;
+    const BEST: &str = "Fizz works best in kitty or Ghostty";
+    if std::env::var_os("TMUX").is_some_and(|v| !v.is_empty()) {
+        return format!("coloured blocks only inside tmux. {BEST}, outside tmux");
+    }
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return "can't tell (not run in a terminal)".into();
+    }
+    match Picker::from_query_stdio().map(|p| p.protocol_type()) {
+        Ok(ProtocolType::Kitty) => "shown as real pictures (kitty graphics)".into(),
+        Ok(ProtocolType::Sixel) => "shown as real pictures (sixel)".into(),
+        Ok(ProtocolType::Iterm2) => "shown as real pictures (iTerm2)".into(),
+        _ => format!("coloured blocks only in this terminal. {BEST}"),
+    }
 }
 
 fn enter_extras() {
@@ -238,6 +259,7 @@ async fn event_loop(
         }
         _ => app.load_demo(),
     }
+    app.hint_about_terminal();
     theme::watch(tx.clone());
     if app_is_live {
         update::watch(tx);
