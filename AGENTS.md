@@ -106,6 +106,8 @@ update banner. Do this only when the owner asks for a release.
   - `codes.rs`: spotting one-time codes in message text
   - `store.rs`: the SQLite database (tables, search, read markers)
   - `index.rs`: downloading message text into it and keeping it current
+  - `storage.rs`: keeping the caches within their limits, and the
+    storage report
   - `metrics.rs`: timings and usage for the stats screen
   - `update.rs`: finding a newer release or commit, the banner's source,
     and `fizz update` for both kinds of install

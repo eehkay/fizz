@@ -93,6 +93,11 @@ pub struct Progress {
     pub scanned: u64,
     /// How many messages the server says exist, once known.
     pub total: Option<u64>,
+    /// True when the download stopped, or older text was removed, because
+    /// of a limit in the settings rather than reaching the start of
+    /// history. If the limit is later loosened, the download carries on.
+    #[serde(default)]
+    pub limited: bool,
 }
 
 impl Progress {
@@ -158,6 +163,67 @@ pub fn upgrade(keep: bool) -> Result<Option<store::Imported>> {
     Ok(Some(imported))
 }
 
+const MB: u64 = 1024 * 1024;
+
+/// The settings' limits: the earliest date to keep (if years are limited)
+/// and the most bytes to take (if size is).
+fn limits() -> (Option<i64>, Option<u64>) {
+    let search = &crate::config::settings().search;
+    let years = i64::from(search.years);
+    let cutoff = (years > 0)
+        .then(|| chrono::Utc::now().timestamp_millis() - years * 365 * 24 * 3600 * 1000);
+    let cap = (search.max_mb > 0).then(|| search.max_mb.saturating_mul(MB));
+    (cutoff, cap)
+}
+
+/// Bring the stored text within the limits: drop what is older than the
+/// years allowed, then the oldest of the rest if it is still too big.
+/// Returns how many messages were removed.
+pub fn trim(conn: &rusqlite::Connection, progress: &mut Progress) -> u64 {
+    let (cutoff, cap) = limits();
+    let before = store::message_count(conn);
+    let mut removed = 0;
+    if let Some(cutoff) = cutoff {
+        removed += store::delete_before(conn, cutoff);
+    }
+    // Deleting leaves the file its old size until it is compacted, which
+    // rewrites it, so that is only done after a real clear-out.
+    if removed * 20 >= before.max(1) {
+        store::compact(conn);
+    }
+    if let Some(cap) = cap {
+        // How much a message takes varies with its age, so removing a
+        // share of the messages is only an estimate of the space freed:
+        // measure, remove, compact and measure again until it fits.
+        for _ in 0..5 {
+            let size = store::size_on_disk();
+            let held = store::message_count(conn);
+            if size <= cap || held == 0 {
+                break;
+            }
+            // Aim a little under, so new messages do not tip it back over.
+            let target = cap / 10 * 9;
+            let excess = (size - target) as f64 / size as f64;
+            let gone = store::delete_oldest(conn, (held as f64 * excess).ceil() as u64);
+            if gone == 0 {
+                break;
+            }
+            removed += gone;
+            store::compact(conn);
+        }
+    }
+    if removed > 0 {
+        progress.limited = true;
+        progress.complete = true;
+        progress.stored = store::message_count(conn);
+        if let Some(oldest) = store::oldest_date(conn) {
+            progress.oldest = oldest;
+        }
+        progress.save(conn);
+    }
+    removed
+}
+
 fn store_page(conn: &mut rusqlite::Connection, messages: &[Message]) -> Result<u64> {
     let owned = store::rows_from(messages);
     let rows: Vec<store::Row> = owned
@@ -216,14 +282,33 @@ pub async fn run(
         }
     }
 
-    // Then history, newest first, so recent messages are searchable early.
-    // With a limit in the settings, stop once that far back.
-    let years = i64::from(crate::config::settings().search.years);
-    let cutoff = (years > 0)
-        .then(|| chrono::Utc::now().timestamp_millis() - years * 365 * 24 * 3600 * 1000);
+    // Apply the limits to what is already held.
+    trim(&conn, &mut progress);
+    let (cutoff, cap) = limits();
+    // If the download was held back by a limit that has since been
+    // loosened, there is older history to fetch again.
+    if progress.complete && progress.limited {
+        // A month of slack: text trimmed to the limit sits right at it,
+        // and must not be mistaken for a limit that has moved.
+        let month = 30 * 24 * 3600 * 1000;
+        let room_in_time = cutoff.is_none_or(|cutoff| progress.oldest > cutoff + month);
+        let room_on_disk = cap.is_none_or(|cap| store::size_on_disk() < cap / 10 * 8);
+        if room_in_time && room_on_disk {
+            progress.complete = false;
+            progress.limited = false;
+        }
+    }
+    report(&progress);
+
+    // Then history, newest first, so recent messages are searchable early,
+    // stopping at either limit.
     while !progress.complete {
-        if cutoff.is_some_and(|cutoff| progress.oldest > 0 && progress.oldest < cutoff) {
+        let far_enough = cutoff.is_some_and(|cutoff| progress.oldest > 0 && progress.oldest < cutoff);
+        let full = cap.is_some_and(|cap| pages % 10 == 0 && store::size_on_disk() >= cap);
+        if far_enough || full {
             progress.complete = true;
+            progress.limited = true;
+            trim(&conn, &mut progress);
             progress.save(&conn);
             report(&progress);
             break;

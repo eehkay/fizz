@@ -4,7 +4,6 @@
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::api::{Api, encode};
@@ -12,8 +11,6 @@ use crate::app::AppEvent;
 use crate::config::cache_dir;
 use crate::model::Attachment;
 
-/// Downloaded files are kept this long so reopening one is instant.
-const KEEP_FOR: Duration = Duration::from_secs(14 * 24 * 3600);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Then {
@@ -82,6 +79,8 @@ pub async fn local_copy(
 ) -> Result<PathBuf> {
     let dir = files_dir().join(encode(&attachment.guid));
     if let Some(path) = existing(&dir) {
+        // Used again: keep it from being the next thing trimmed.
+        crate::storage::touch(&path);
         return Ok(path);
     }
     tokio::fs::create_dir_all(&dir).await?;
@@ -529,56 +528,6 @@ pub fn read_clipboard() -> Result<Clipboard> {
         }
     }
     Ok(Clipboard::Empty)
-}
-
-/// Picture thumbnails are tiny, but there is one for every picture ever
-/// scrolled past. Drop those not needed for three months; they are fetched
-/// again if that conversation is opened.
-fn prune_thumbnails() {
-    const KEEP: Duration = Duration::from_secs(90 * 24 * 3600);
-    let now = SystemTime::now();
-    // Thumbnails, and the GIFs kept whole so they can play.
-    let entries = ["thumbs", "gifs"]
-        .into_iter()
-        .filter_map(|folder| std::fs::read_dir(cache_dir().join(folder)).ok())
-        .flatten();
-    for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > KEEP);
-        if stale {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// Drop downloads that have not been touched for a while.
-pub fn prune() {
-    prune_thumbnails();
-    let now = SystemTime::now();
-    let entries = [files_dir(), cache_dir().join("outbox")]
-        .into_iter()
-        .filter_map(|dir| std::fs::read_dir(dir).ok())
-        .flatten();
-    for entry in entries.flatten() {
-        let old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|modified| now.duration_since(modified).ok())
-            .is_some_and(|age| age > KEEP_FOR);
-        if old {
-            let path = entry.path();
-            let _ = if path.is_dir() {
-                std::fs::remove_dir_all(path)
-            } else {
-                std::fs::remove_file(path)
-            };
-        }
-    }
 }
 
 #[cfg(test)]

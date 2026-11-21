@@ -200,7 +200,8 @@ fizz setup     # enter or change the server address and password
 fizz check     # test the connection without opening the app
 fizz config    # open the settings file in your $EDITOR
 fizz update    # install the newest version (--check only looks)
-fizz index     # what the message-text search index holds ("fizz index delete" removes it)
+fizz storage   # what Fizz keeps on disk, against each store's limit
+fizz index     # the message-text search index ("fizz index delete" removes it)
 fizz --demo    # made-up conversations, no server needed
 fizz --help    # this list, and the environment variables
 ```
@@ -216,7 +217,8 @@ its default written out, each with a comment. It covers:
 
 - **Updates:** whether to check for new versions, and how often
 - **Startup:** whether to remember the last session so it opens instantly
-- **Search:** how many years of message text to keep for word search
+- **Search:** how many years of message text to keep for word search, and
+  the most space it may take
 - **Codes:** whether to pick out one-time codes, and whether to copy them
   automatically
 - **Notifications:** on or off, whether they show the message text, and an
@@ -225,7 +227,8 @@ its default written out, each with a comment. It covers:
   24 hour clock, chat list width, conversation width, mouse on or off,
   blue and green bubbles by service
 - **Media:** inline pictures on or off, how large they are drawn, playing
-  GIFs, video stills and their size limit, where files are saved
+  GIFs, video stills and their size limit, where files are saved, and how
+  much the picture and file caches may hold
 - **Messages:** default country code for new chats, send method, the emoji
   popup, how often to poll, whether to mark chats read on the server and
   whether to show others when you are typing
@@ -318,9 +321,8 @@ in the search layer.
   messages at a time so the app stays responsive. Half a million messages
   takes around half an hour, and you can search what has arrived so far.
   After that it only adds new messages.
-- **Limiting it:** set `years` under `[search]` in the settings to keep only
-  that many years.
-- **Checking or removing it:** `fizz index` shows what it holds;
+- **Limiting it:** by years or by size; see [Storage limits](#storage-limits).
+- **Checking or removing it:** `fizz storage` shows what it uses;
   `fizz index delete` removes it and turns it off.
 
 ## New conversations
@@ -547,6 +549,32 @@ patched (OpenCore) Macs, which differ.
    It should print `Private API on`. "Enabled, helper not connected" means
    the switch is on but the helper did not load, which usually means SIP
    is still on (`csrutil status` on the Mac tells you).
+
+## Storage limits
+
+```sh
+fizz storage    # what each store is using, and its limit
+```
+
+Fizz keeps three things that can grow, and each has its own limit in the
+settings. When a size limit is reached, the least recently used things go
+first. Limits are applied when Fizz starts and every quarter of an hour
+while it is open.
+
+| Store | What it is | Limits | Defaults |
+| --- | --- | --- | --- |
+| Search text | Message text, if you turned on word search | `years` and `max_mb` under `[search]` | everything, no size limit |
+| Pictures | A small copy of each picture you scroll past, and GIFs | `picture_cache_mb` under `[media]` | 150 MB; unused for 90 days |
+| Files | Things you open or save, and videos fetched for a still | `file_cache_mb` and `file_cache_days` under `[media]` | 250 MB; unused for 14 days |
+
+Search text is small, roughly 14 MB for every 100,000 messages, so it is
+unlimited unless you say otherwise. With `years` set, older text is
+removed as it ages out; with `max_mb` set, the oldest goes first. The
+search screen shows how far back it reaches. Loosening a limit later lets
+the download of older history carry on from where it stopped.
+
+The caches hold nothing that cannot be fetched again: anything trimmed
+comes back from the server the next time it is needed.
 
 ## What Fizz keeps on your computer
 

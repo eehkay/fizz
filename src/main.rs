@@ -13,6 +13,7 @@ mod input;
 mod live;
 mod metrics;
 mod model;
+mod storage;
 mod store;
 mod theme;
 mod update;
@@ -47,6 +48,7 @@ Usage:
   fizz check      Test the connection and print what was found
   fizz config     Open the settings file in your editor
   fizz update     Install the newest version (--check only looks)
+  fizz storage    Show what Fizz keeps on disk and each store's limit
   fizz index      Show the message-text search index (add: delete, to
                   remove it and turn it off)
   fizz sound      Play the notification sound
@@ -96,6 +98,30 @@ async fn main() -> Result<()> {
     }
     if has("config") {
         return config::edit_settings();
+    }
+    if has("storage") {
+        // What each store is using against its limit. Trim first, so the
+        // figures are what the limits leave.
+        storage::trim();
+        println!("{:<12} {:>9}  {:>7}  {}", "", "on disk", "items", "limit");
+        let mut total = 0;
+        for line in storage::report() {
+            total += line.bytes;
+            println!(
+                "{:<12} {:>6.1} MB  {:>7}  {}",
+                line.name,
+                line.bytes as f64 / 1048576.0,
+                line.items,
+                line.limit
+            );
+        }
+        println!("{:<12} {:>6.1} MB", "Total", total as f64 / 1048576.0);
+        println!();
+        for line in storage::report() {
+            println!("{:<12} {}", line.name, line.place.display());
+        }
+        println!("\nLimits are in the settings: fizz config  (see [search] and [media])");
+        return Ok(());
     }
     if has("update") {
         return update::update(has("--check")).await;
@@ -321,7 +347,7 @@ fn leave_extras() {
 
 async fn run(config: Option<Config>) -> Result<()> {
     let api = config.as_ref().map(Api::new).transpose()?;
-    std::thread::spawn(files::prune);
+    std::thread::spawn(storage::trim);
 
     let mut terminal = ratatui::init();
     // Ask the terminal what kind of pictures it can show before any input

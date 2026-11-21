@@ -200,6 +200,14 @@ pub struct Media {
     pub video_stills: bool,
     pub video_still_limit_mb: u64,
     pub downloads: String,
+    /// The most the picture cache (thumbnails and GIFs) may take, in
+    /// megabytes. 0 is no limit.
+    pub picture_cache_mb: u64,
+    /// The same for opened files and videos.
+    pub file_cache_mb: u64,
+    /// Opened files not used for this many days are removed. 0 keeps
+    /// them until the size limit pushes them out.
+    pub file_cache_days: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -272,6 +280,9 @@ pub struct Search {
     /// How many years of message text to keep for searching by words.
     /// 0 keeps everything.
     pub years: u32,
+    /// The most disk the search text may take, in megabytes. 0 is no
+    /// limit.
+    pub max_mb: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -320,6 +331,9 @@ impl Default for Media {
             video_stills: true,
             video_still_limit_mb: 40,
             downloads: "~/Downloads".into(),
+            picture_cache_mb: 150,
+            file_cache_mb: 250,
+            file_cache_days: 14,
         }
     }
 }
@@ -362,10 +376,15 @@ remember = true
 [search]
 # Searching messages by their words keeps a copy of message text on this
 # computer (it is off until you turn it on in the search screen with
-# Ctrl+B). It is small: roughly 15 MB for every 100,000 messages. To keep
-# only recent history, set a number of years here; 0 keeps everything.
-# See what it is using with: fizz index      Remove it: fizz index delete
+# Ctrl+B). It is small: roughly 14 MB for every 100,000 messages.
+# See what it is using with: fizz storage    Remove it: fizz index delete
+#
+# Keep only this many years of it; older text is removed as it ages out.
+# 0 keeps everything.
 years = 0
+# And never let it take more than this many megabytes; the oldest text
+# goes first. 0 is no limit.
+max_mb = 0
 
 [codes]
 # Spot one-time codes ("Your verification code is 482913") in messages that
@@ -418,6 +437,16 @@ video_stills = true
 video_still_limit_mb = 40
 # Where "s" saves pictures and files.
 downloads = "~/Downloads"
+# How much disk the caches may use. Each has its own limit, and when one is
+# reached the least recently used things go first. 0 means no size limit.
+# See what each is using with: fizz storage
+# Pictures: a small copy of each picture you scroll past, and GIFs.
+picture_cache_mb = 150
+# Files: anything you open or save, and videos fetched for their still.
+file_cache_mb = 250
+# Files not used for this many days are removed whatever the size. 0 keeps
+# them until the size limit pushes them out.
+file_cache_days = 14
 
 [messages]
 # Added to phone numbers typed without a country code when starting a chat.

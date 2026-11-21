@@ -324,6 +324,41 @@ pub fn clear_messages(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Remove messages older than `date` (milliseconds). Returns how many.
+pub fn delete_before(conn: &Connection, date: i64) -> u64 {
+    conn.execute("DELETE FROM messages WHERE date < ?1", [date])
+        .unwrap_or(0) as u64
+}
+
+/// Remove the `count` oldest messages. Returns how many went.
+pub fn delete_oldest(conn: &Connection, count: u64) -> u64 {
+    conn.execute(
+        "DELETE FROM messages WHERE id IN
+         (SELECT id FROM messages ORDER BY date ASC LIMIT ?1)",
+        [count as i64],
+    )
+    .unwrap_or(0) as u64
+}
+
+/// The date of the oldest message held.
+pub fn oldest_date(conn: &Connection) -> Option<i64> {
+    conn.query_row("SELECT min(date) FROM messages", [], |row| row.get(0))
+        .ok()
+        .flatten()
+}
+
+/// Hand space freed by deletions back to the system. Rewrites the file,
+/// so it is for after a real clear-out, not every small change.
+pub fn compact(conn: &Connection) {
+    // The search index keeps removed entries around until it is merged
+    // down; without this the file barely shrinks after a big deletion.
+    let _ = conn.execute_batch(
+        "INSERT INTO messages_fts(messages_fts) VALUES ('optimize');
+         VACUUM;
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    );
+}
+
 // ----- search ----------------------------------------------------------
 
 /// One message found by a search.
@@ -604,6 +639,24 @@ mod tests {
         assert_eq!(put(&mut conn, &[row(standard, "c", 1, "packed one")]).unwrap(), 0);
         remove(&conn, standard);
         assert_eq!(message_count(&conn), 1);
+    }
+
+    #[test]
+    fn trims_by_date_and_by_count() {
+        let mut conn = memory();
+        let rows: Vec<(String, i64)> = (1..=10).map(|i| (format!("m{i}"), i * 100)).collect();
+        let batch: Vec<Row> = rows.iter().map(|(g, d)| row(g, "c", *d, "word")).collect();
+        put(&mut conn, &batch).unwrap();
+        assert_eq!(oldest_date(&conn), Some(100));
+        // Everything before 350 goes: m1, m2, m3.
+        assert_eq!(delete_before(&conn, 350), 3);
+        assert_eq!(oldest_date(&conn), Some(400));
+        // Then the two oldest of what is left: m4, m5.
+        assert_eq!(delete_oldest(&conn, 2), 2);
+        assert_eq!(oldest_date(&conn), Some(600));
+        // Search no longer finds what was removed.
+        assert_eq!(count_matching(&conn, "word").unwrap(), 5);
+        assert_eq!(message_count(&conn), 5);
     }
 
     #[test]

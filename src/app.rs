@@ -403,6 +403,7 @@ pub struct App {
     /// Chats shown from memory that the server has not yet confirmed.
     unconfirmed: HashSet<String>,
     last_saved: Instant,
+    last_trimmed: Instant,
     /// Fizz's database, for the small things written as you go.
     store: Option<rusqlite::Connection>,
     /// Whether the server can be told a chat was read.
@@ -517,6 +518,7 @@ impl App {
             stale: HashSet::new(),
             unconfirmed: HashSet::new(),
             last_saved: Instant::now(),
+            last_trimmed: Instant::now(),
             helper: false,
             marked: HashMap::new(),
             online: None,
@@ -3082,6 +3084,12 @@ impl App {
         self.frame = self.frame.wrapping_add(1);
         if self.last_saved.elapsed() > Duration::from_secs(90) {
             self.remember();
+        }
+        // Keep the caches within their limits while running, not only at
+        // startup: a session can stay open for days.
+        if self.last_trimmed.elapsed() > Duration::from_secs(15 * 60) {
+            self.last_trimmed = Instant::now();
+            std::thread::spawn(crate::storage::trim);
         }
         self.sync_typing();
         if self.stats {

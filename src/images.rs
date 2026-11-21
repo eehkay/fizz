@@ -17,7 +17,10 @@ use crate::config::cache_dir;
 
 /// Longest edge of the copy kept on disk. Big enough for any terminal cell
 /// box we draw into, small enough that the cache stays modest.
-const CACHE_EDGE: u32 = 900;
+const CACHE_EDGE: u32 = 640;
+/// JPEG quality for cached copies: plenty for something drawn a few
+/// hundred pixels wide, at about a third of the size of the default.
+const CACHE_QUALITY: u8 = 72;
 
 pub enum ImageState {
     Loading,
@@ -128,7 +131,10 @@ async fn load_gif(
 ) -> Result<Option<Vec<(DynamicImage, Duration)>>> {
     let path = gif_cache_path(&attachment.guid);
     let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
+        Ok(bytes) => {
+            crate::storage::touch(&path);
+            bytes
+        }
         Err(_) => {
             let bytes = api.attachment(&attachment.guid).await?;
             if let Some(dir) = path.parent() {
@@ -170,11 +176,15 @@ fn write_cache(guid: &str, img: &DynamicImage) -> Result<()> {
     let dir = path.parent().context("cache path has no parent")?;
     std::fs::create_dir_all(dir)?;
     let mut bytes = Vec::new();
-    if img.color().has_alpha() {
+    // PNG is many times larger, so it is used only for pictures that
+    // really have see-through parts. Plenty of pictures (screenshots
+    // especially) carry a transparency channel that is entirely opaque.
+    let see_through = img.color().has_alpha() && img.to_rgba8().pixels().any(|p| p.0[3] < 255);
+    if see_through {
         img.write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)?;
     } else {
-        img.to_rgb8()
-            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Jpeg)?;
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, CACHE_QUALITY);
+        img.to_rgb8().write_with_encoder(encoder)?;
     }
     // Write then rename so a half-written file is never read back.
     let tmp = dir.join(format!(".{}.tmp", std::process::id()));
@@ -225,6 +235,8 @@ async fn load(api: &Api, attachment: &Attachment, box_px: (u32, u32)) -> Result<
     let guid = attachment.guid.as_str();
     let path = cache_path(guid);
     if let Ok(bytes) = tokio::fs::read(&path).await {
+        // Looked at again: keep it from being the next thing trimmed.
+        crate::storage::touch(&path);
         let cached = tokio::task::spawn_blocking(move || {
             decode(&bytes).map(|img| shrink(img, box_px.0, box_px.1))
         })
