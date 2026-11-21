@@ -74,6 +74,10 @@ FIZZ_NOTIFY=0 turns off desktop notifications for new messages.";
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // For the commands that print and exit: if whatever is reading the
+    // output stops early (`fizz check | head`), end quietly as other
+    // tools do, rather than with an error about a broken pipe.
+    quiet_on_closed_pipe(true);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
 
@@ -345,7 +349,22 @@ fn leave_extras() {
     );
 }
 
+/// Whether a write to a closed pipe should end the program silently
+/// (right for print-and-exit commands) or be reported as an ordinary
+/// error (right for the app, which must put the terminal back first).
+fn quiet_on_closed_pipe(quiet: bool) {
+    #[cfg(unix)]
+    // Safe: changing how one signal is handled, before any other threads
+    // depend on it.
+    unsafe {
+        libc::signal(libc::SIGPIPE, if quiet { libc::SIG_DFL } else { libc::SIG_IGN });
+    }
+    #[cfg(not(unix))]
+    let _ = quiet;
+}
+
 async fn run(config: Option<Config>) -> Result<()> {
+    quiet_on_closed_pipe(false);
     let api = config.as_ref().map(Api::new).transpose()?;
     std::thread::spawn(storage::trim);
 
