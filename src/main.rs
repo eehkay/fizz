@@ -274,9 +274,15 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
         // What the search screen does: the newest eighty, with their text.
         let started = std::time::Instant::now();
         let shown = store::search(&conn, &query, 80)?.len();
+        let fetched = started.elapsed();
+        // And which conversations they are in.
+        let started = std::time::Instant::now();
+        let conversations = store::mentions(&conn, &query)?.len();
         println!(
-            "{matching} messages (counted in {} ms; the newest {shown} fetched in {} ms)",
+            "{matching} messages in {conversations} conversations (counted in {} ms; \
+             the newest {shown} fetched in {} ms; grouped by conversation in {} ms)",
             counted.as_millis(),
+            fetched.as_millis(),
             started.elapsed().as_millis()
         );
         return Ok(());
@@ -457,7 +463,8 @@ async fn event_loop(
 }
 
 /// Render the demo once to plain text: `fizz --snapshot 120x36`. Add
-/// `--splash` to render the loading screen instead.
+/// `--splash` to render the loading screen instead, or `--search <words>`
+/// for the search layer with those words typed.
 fn snapshot(size: Option<&str>) -> Result<()> {
     let (w, h) = size
         .and_then(|s| s.split_once('x'))
@@ -470,6 +477,10 @@ fn snapshot(size: Option<&str>) -> Result<()> {
         .any(|a| a == "--splash")
         .then(|| std::time::Instant::now() + Duration::from_secs(3600));
     app.frame = 23;
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--search") {
+        app.search_for(&args[i + 1..].join(" "));
+    }
     let mut terminal = Terminal::new(TestBackend::new(w, h))?;
     terminal.draw(|frame| ui::draw(frame, &mut app))?;
     let buffer = terminal.backend().buffer();

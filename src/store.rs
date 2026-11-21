@@ -412,6 +412,46 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Hit>> 
     Ok(hits)
 }
 
+/// One conversation's share of a search: how many of its messages match,
+/// and the newest of them, which is where opening it should land.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mention {
+    pub chat: String,
+    pub count: u64,
+    pub date: i64,
+    pub guid: String,
+}
+
+/// Every conversation with messages containing the words of `query`, the
+/// one with the most first.
+pub fn mentions(conn: &Connection, query: &str) -> Result<Vec<Mention>> {
+    let Some(expression) = match_expression(query) else {
+        return Ok(Vec::new());
+    };
+    // With a single max() in the query, SQLite takes the other plain
+    // columns (here the message's id) from the row that holds the maximum.
+    let mut statement = conn.prepare_cached(
+        "SELECT c.guid, count(*), max(m.date), m.guid
+         FROM messages_fts
+         JOIN messages m ON m.id = messages_fts.rowid
+         JOIN chats c ON c.id = m.chat
+         WHERE messages_fts MATCH ?1
+         GROUP BY m.chat
+         ORDER BY count(*) DESC, max(m.date) DESC",
+    )?;
+    let found = statement
+        .query_map([expression], |row| {
+            Ok(Mention {
+                chat: row.get(0)?,
+                count: row.get::<_, i64>(1)? as u64,
+                date: row.get(2)?,
+                guid: unpack(row.get_ref(3)?),
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(found)
+}
+
 /// How many messages contain every word of `query`.
 pub fn count_matching(conn: &Connection, query: &str) -> Result<u64> {
     let Some(expression) = match_expression(query) else {
@@ -602,6 +642,31 @@ mod tests {
         assert_eq!(search(&conn, "cafe", 10).unwrap().len(), 1);
         assert!(search(&conn, "?!", 10).unwrap().is_empty());
         assert_eq!(count_matching(&conn, "tomorrow").unwrap(), 2);
+    }
+
+    #[test]
+    fn says_which_conversations_mention_the_words() {
+        let mut conn = memory();
+        put(
+            &mut conn,
+            &[
+                row("a", "chat1", 10, "Lunch tomorrow?"),
+                row("b", "chat2", 20, "Tomorrow is fine"),
+                row("c", "chat2", 40, "See you tomorrow then"),
+                row("d", "chat2", 30, "tomorrow at noon"),
+                row("e", "chat3", 50, "Nothing relevant"),
+            ],
+        )
+        .unwrap();
+        let found = mentions(&conn, "tomorrow").unwrap();
+        // The conversation with the most comes first, and each carries its
+        // newest match, which is where opening it lands.
+        assert_eq!(found.len(), 2);
+        assert_eq!((found[0].chat.as_str(), found[0].count), ("chat2", 3));
+        assert_eq!((found[0].guid.as_str(), found[0].date), ("c", 40));
+        assert_eq!((found[1].chat.as_str(), found[1].count, found[1].guid.as_str()), ("chat1", 1, "a"));
+        assert!(mentions(&conn, "nowhere").unwrap().is_empty());
+        assert!(mentions(&conn, "  ").unwrap().is_empty());
     }
 
     #[test]

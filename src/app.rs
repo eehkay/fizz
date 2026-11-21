@@ -38,6 +38,8 @@ const PLAYING_GIFS: usize = 6;
 /// How many results of each kind the search layer shows.
 const SEARCH_CONVERSATIONS: usize = 8;
 const SEARCH_MESSAGES: usize = 80;
+/// How many of the conversations a search's words appear in are listed.
+const SEARCH_MENTIONS: usize = 6;
 
 /// How far back the first look for conversations goes: three months.
 const RECENT_WINDOW_MS: i64 = 90 * 24 * 3600 * 1000;
@@ -66,6 +68,8 @@ pub enum AppEvent {
     Found {
         generation: u64,
         hits: Vec<crate::index::Hit>,
+        /// Every conversation with a match, the one with the most first.
+        mentions: Vec<crate::index::Mention>,
     },
     /// What the server says about itself, including whether its Private
     /// API helper is connected.
@@ -291,10 +295,17 @@ pub struct App {
     /// reach conversations older than the list has scrolled to.
     index: Vec<Chat>,
     /// The row highlighted in the search layer, counting conversations
-    /// first and then messages.
+    /// found by name first, then the conversations the words appear in,
+    /// then messages.
     pub search_index: usize,
     /// Messages found by their text.
     pub found: Vec<crate::index::Hit>,
+    /// The conversations those messages are in, the one with the most
+    /// first, cut to the few that are listed.
+    mentions: Vec<crate::index::Mention>,
+    /// How many messages matched in all, and in how many conversations.
+    pub found_total: u64,
+    pub found_in: usize,
     search_generation: u64,
     /// The local copy of message text: how far it has got, and where
     /// newly arrived messages are handed to it.
@@ -452,6 +463,9 @@ impl App {
             contacts: HashMap::new(),
             search_index: 0,
             found: Vec::new(),
+            mentions: Vec::new(),
+            found_total: 0,
+            found_in: 0,
             search_generation: 0,
             indexing: None,
             index_tx: None,
@@ -831,9 +845,35 @@ impl App {
             .collect()
     }
 
+    /// The conversations the searched words appear in, most matches
+    /// first. Empty for a single match, where it would only repeat it.
+    pub fn mention_hits(&self) -> &[crate::index::Mention] {
+        match self.found_total {
+            0 | 1 => &[],
+            _ => &self.mentions,
+        }
+    }
+
+    /// Where each section of the search layer starts, as row numbers:
+    /// conversations by name, conversations by content, messages, the end.
+    fn search_sections(&self) -> [usize; 4] {
+        let names = self.conversation_hits().len();
+        let mentions = names + self.mention_hits().len();
+        [0, names, mentions, mentions + self.found.len()]
+    }
+
     /// How many rows the search layer has to move through.
     pub fn search_rows(&self) -> usize {
-        self.conversation_hits().len() + self.found.len()
+        self.search_sections()[3]
+    }
+
+    /// Take in what a search found.
+    fn set_found(&mut self, hits: Vec<crate::index::Hit>, mut mentions: Vec<crate::index::Mention>) {
+        self.found_total = mentions.iter().map(|m| m.count).sum();
+        self.found_in = mentions.len();
+        mentions.truncate(SEARCH_MENTIONS);
+        self.mentions = mentions;
+        self.found = hits;
     }
 
     /// A conversation's name from its id, wherever we know it from.
@@ -843,6 +883,16 @@ impl App {
             .chain(&self.index)
             .find(|c| c.guid == guid)
             .map_or_else(|| "Conversation".to_string(), |c| self.chat_title(c))
+    }
+
+    /// Whether a conversation, by its id, has more than one other person
+    /// in it. The id itself says so when we know nothing else about it.
+    pub fn is_group(&self, guid: &str) -> bool {
+        self.chats
+            .iter()
+            .chain(&self.index)
+            .find(|c| c.guid == guid)
+            .map_or_else(|| guid.contains(";+;"), Chat::is_group)
     }
 
     /// The search text changed: redo both kinds of result.
@@ -872,17 +922,33 @@ impl App {
                 })
                 .collect();
             found.sort_by_key(|h| std::cmp::Reverse(h.date));
-            self.found = found;
+            // Newest first, so the first of each conversation is where
+            // opening that conversation should land.
+            let mut mentions: Vec<crate::index::Mention> = Vec::new();
+            for hit in &found {
+                match mentions.iter_mut().find(|m| m.chat == hit.chat) {
+                    Some(known) => known.count += 1,
+                    None => mentions.push(crate::index::Mention {
+                        chat: hit.chat.clone(),
+                        count: 1,
+                        date: hit.date,
+                        guid: hit.guid.clone(),
+                    }),
+                }
+            }
+            mentions.sort_by_key(|m| (std::cmp::Reverse(m.count), std::cmp::Reverse(m.date)));
+            self.set_found(found, mentions);
             return;
         }
         if query.chars().count() < 2 || !crate::index::enabled() {
-            self.found.clear();
+            self.set_found(Vec::new(), Vec::new());
             return;
         }
         let (generation, tx) = (self.search_generation, self.tx.clone());
         tokio::task::spawn_blocking(move || {
             let hits = crate::index::search(&query, SEARCH_MESSAGES).unwrap_or_default();
-            let _ = tx.send(AppEvent::Found { generation, hits });
+            let mentions = crate::index::mentions(&query).unwrap_or_default();
+            let _ = tx.send(AppEvent::Found { generation, hits, mentions });
         });
     }
 
@@ -900,29 +966,55 @@ impl App {
             self.cursor = Some(guid);
             return self.open_cursor();
         }
-        let Some(hit) = self
-            .found
-            .get(self.search_index - conversations.len().min(self.search_index))
-            .cloned()
-        else {
-            return;
+        let [_, names, mentions, _] = self.search_sections();
+        // A conversation the words appear in opens at its newest match; a
+        // message opens at that message.
+        let (chat, guid, date, sender) = if self.search_index < mentions {
+            let Some(found) = self.mention_hits().get(self.search_index.saturating_sub(names)) else {
+                return;
+            };
+            (found.chat.clone(), found.guid.clone(), found.date, String::new())
+        } else {
+            let Some(hit) = self.found.get(self.search_index - mentions) else {
+                return;
+            };
+            (hit.chat.clone(), hit.guid.clone(), hit.date, hit.sender.clone())
         };
-        // A message: make sure its conversation is in the list, then open
-        // the conversation at that point in its history.
+        // Make sure the conversation is in the list, then open it at that
+        // point in its history.
         let known = self
             .chats
             .iter()
             .chain(&self.index)
-            .find(|c| c.guid == hit.chat)
+            .find(|c| c.guid == chat)
             .cloned()
             .unwrap_or_else(|| Chat {
-                guid: hit.chat.clone(),
-                chat_identifier: hit.sender.clone(),
+                guid: chat.clone(),
+                chat_identifier: sender,
                 ..Chat::default()
             });
         self.adopt_chat(known);
-        self.cursor = Some(hit.chat.clone());
-        self.open_at(&hit.chat, &hit.guid, hit.date);
+        self.cursor = Some(chat.clone());
+        self.open_at(&chat, &guid, date);
+    }
+
+    /// Move the highlight to the start of the next section of results,
+    /// going round to the top after the last.
+    fn next_search_section(&mut self) {
+        let sections = self.search_sections();
+        let rows = sections[3];
+        self.search_index = sections[1..3]
+            .iter()
+            .copied()
+            .find(|start| *start > self.search_index && *start < rows)
+            .unwrap_or(0);
+    }
+
+    /// Open the search layer on some words, as typing them would.
+    pub fn search_for(&mut self, words: &str) {
+        self.filtering = true;
+        self.filter = words.to_string();
+        self.search_changed();
     }
 
     /// Put a conversation found by search into the list, if it is not there.
@@ -2806,10 +2898,10 @@ impl App {
                 }
             }
             AppEvent::Indexing(progress) => self.indexing = Some(progress),
-            AppEvent::Found { generation, hits } => {
+            AppEvent::Found { generation, hits, mentions } => {
                 // Results for text that has since been edited are stale.
                 if generation == self.search_generation {
-                    self.found = hits;
+                    self.set_found(hits, mentions);
                     self.search_index = self.search_index.min(self.search_rows().saturating_sub(1));
                 }
             }
@@ -3564,9 +3656,8 @@ impl App {
         match key.code {
             KeyCode::Esc => self.filtering = false,
             KeyCode::Enter => self.open_search_result(),
-            KeyCode::Down | KeyCode::Tab if rows > 0 => {
-                self.search_index = (self.search_index + 1).min(rows - 1)
-            }
+            KeyCode::Down if rows > 0 => self.search_index = (self.search_index + 1).min(rows - 1),
+            KeyCode::Tab => self.next_search_section(),
             KeyCode::Up => self.search_index = self.search_index.saturating_sub(1),
             KeyCode::PageDown if rows > 0 => {
                 self.search_index = (self.search_index + 8).min(rows - 1)
@@ -3643,5 +3734,60 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn demo() -> App {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(None, tx, ratatui_image::picker::Picker::halfblocks());
+        app.load_demo();
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.on_filter_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn search_lists_names_then_conversations_then_messages() {
+        let mut app = demo();
+        app.search_for("the");
+        let [_, names, mentions, rows] = app.search_sections();
+        assert!(names > 0 && mentions > names && rows > mentions, "all three sections have rows");
+        // Every match is counted once, in the conversation it belongs to.
+        assert_eq!(app.found_total, app.found.len() as u64);
+        assert_eq!(app.found_in, app.mention_hits().len());
+        let most = app.mention_hits()[0].clone();
+        assert!(app.mention_hits().iter().all(|m| m.count <= most.count), "most matches first");
+        let newest = app.found.iter().find(|h| h.chat == most.chat).unwrap();
+        assert_eq!(most.guid, newest.guid, "a conversation opens at its newest match");
+
+        // Tab goes to the start of each section in turn, then back to the top.
+        assert_eq!(app.search_index, 0);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.search_index, names);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.search_index, mentions);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.search_index, 0);
+
+        // Enter on a conversation that mentions the words opens it.
+        app.search_index = names;
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.filtering);
+        assert_eq!(app.open.as_deref(), Some(most.chat.as_str()));
+    }
+
+    #[test]
+    fn one_match_is_not_listed_twice() {
+        let mut app = demo();
+        app.search_for("see you");
+        assert_eq!(app.found.len(), 1);
+        assert!(app.mention_hits().is_empty());
+        assert_eq!(app.search_rows(), app.conversation_hits().len() + 1);
     }
 }

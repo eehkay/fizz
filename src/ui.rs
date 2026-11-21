@@ -285,6 +285,19 @@ fn snippet(text: &str, words: &[String], room: usize, theme: &Theme) -> Line<'st
     Line::from(spans)
 }
 
+/// A count with its thousands set apart: 91,606.
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn draw_search(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme.clone();
     let w = area.width.saturating_sub(6).clamp(30, 108).min(area.width);
@@ -381,31 +394,79 @@ fn draw_search(frame: &mut Frame, app: &mut App, area: Rect) {
         row += 1;
     }
 
+    // The conversations the words appear in, the one with the most first.
+    let mentions = app.mention_hits();
+    if !mentions.is_empty() {
+        if !blocks.is_empty() {
+            blocks.push((None, vec![Line::default()]));
+        }
+        let all = app.found_in;
+        blocks.push((
+            None,
+            vec![header(match all > mentions.len() {
+                true => format!("Mentioned in · {} conversations, top {} shown", grouped(all as u64), mentions.len()),
+                false if all == 1 => "Mentioned in · 1 conversation".to_string(),
+                false => format!("Mentioned in · {all} conversations"),
+            })],
+        ));
+    }
+    for found in mentions {
+        let on = row == chosen;
+        let note = format!(
+            "{} {} · {}",
+            grouped(found.count),
+            if found.count == 1 { "message" } else { "messages" },
+            list_stamp(found.date)
+        );
+        let title = truncate(&app.title_for(&found.chat), width_cells.saturating_sub(width(&note) + 6));
+        let gap = width_cells.saturating_sub(2 + width(&title) + width(&note));
+        let style = if on {
+            Style::new().fg(theme.bright).bg(theme.surface).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.text)
+        };
+        blocks.push((
+            Some(row),
+            vec![Line::from(vec![
+                bar(on),
+                Span::styled(format!("{title}{}", pad(gap)), style),
+                Span::styled(note, style.fg(theme.muted)),
+            ])],
+        ));
+        row += 1;
+    }
+
     if !app.found.is_empty() {
         if !blocks.is_empty() {
             blocks.push((None, vec![Line::default()]));
         }
-        let count = app.found.len();
+        let shown = app.found.len() as u64;
         blocks.push((
             None,
-            vec![header(format!(
-                "Messages · {}",
-                if count >= 80 { "80 newest".to_string() } else { count.to_string() }
-            ))],
+            vec![header(match app.found_total > shown {
+                true => format!("Messages · newest {shown} of {}", grouped(app.found_total)),
+                false => format!("Messages · {shown}"),
+            })],
         ));
     }
     for hit in &app.found {
         let on = row == chosen;
+        // Who said it, where the conversation's name does not already say:
+        // in a group, or when it was you.
+        let chat = app.title_for(&hit.chat);
         let who = if hit.from_me {
-            "You".to_string()
-        } else if hit.sender.is_empty() {
-            "Them".to_string()
+            Some("You".to_string())
+        } else if hit.sender.is_empty() || !app.is_group(&hit.chat) {
+            None
         } else {
-            app.short_name_for(&hit.sender)
+            Some(app.short_name_for(&hit.sender))
         };
         let when = list_stamp(hit.date);
         let title = truncate(
-            &format!("{} · {who}", app.title_for(&hit.chat)),
+            &match who {
+                Some(who) => format!("{chat} · {who}"),
+                None => chat,
+            },
             width_cells.saturating_sub(width(&when) + 6),
         );
         let gap = width_cells.saturating_sub(2 + width(&title) + width(&when));
@@ -878,7 +939,7 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Enter", "Open the conversation and start typing"),
             ("n", "New conversation: type a name, number or email"),
             ("D", "Delete the conversation everywhere (capital D; asks first)"),
-            ("/", "Search: conversations and contacts by name or number, and messages by their words"),
+            ("/", "Search: conversations and contacts by name or number, and messages by their words; Tab jumps between the sections"),
             ("G", "New group: type a name, Enter adds them; then Enter on \"Start the group\""),
             ("Home  End", "Jump to the top or bottom"),
             ("r", "Refresh"),
@@ -2066,7 +2127,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.filtering && !crate::index::enabled() {
         &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("^B", "search message text too"), ("esc", "close")]
     } else if app.filtering {
-        &[("type", "search"), ("↑↓", "move"), ("⏎", "open"), ("^U", "clear"), ("esc", "close")]
+        &[("type", "search"), ("↑↓", "move"), ("tab", "next section"), ("⏎", "open"), ("^U", "clear"), ("esc", "close")]
     } else if app.deleting.is_some() {
         &[("D", "delete for good"), ("any other key", "cancel")]
     } else if app.unsending.is_some() {

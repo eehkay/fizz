@@ -78,7 +78,8 @@ update banner. Do this only when the owner asks for a release.
 - **Messages are private.** To look at the interface, use the demo, which
   has made-up conversations: `fizz --demo` to run it, or
   `fizz --snapshot 120x36` to print one frame as plain text (useful,
-  since you cannot drive a full-screen terminal app directly). Do not
+  since you cannot drive a full-screen terminal app directly; add
+  `--search <words>` for the search layer). Do not
   capture or print the user's real conversations.
 - **`fizz bridge` prints the user's messages.** It is what the bar widget
   reads: the recent conversations and their text, as JSON on standard

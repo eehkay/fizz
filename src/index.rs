@@ -16,7 +16,7 @@ use crate::app::AppEvent;
 use crate::model::Message;
 use crate::store;
 
-pub use crate::store::Hit;
+pub use crate::store::{Hit, Mention};
 
 /// Messages fetched per request while downloading history. Kept modest,
 /// with a pause between requests, because the server answers one thing at
@@ -368,6 +368,15 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<Hit>> {
         return Ok(Vec::new());
     }
     store::search(&store::open()?, query, limit)
+}
+
+/// The conversations those messages are in, the one with the most first.
+/// Blocking, like [`search`].
+pub fn mentions(query: &str) -> Result<Vec<Mention>> {
+    if !store::path().exists() {
+        return Ok(Vec::new());
+    }
+    store::mentions(&store::open()?, query)
 }
 
 #[cfg(test)]

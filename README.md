@@ -14,7 +14,7 @@ to open it. See [On Omarchy](#on-omarchy).
 
 | Search conversations and message text | Every key, on `?` |
 | --- | --- |
-| ![The search layer listing a matching conversation and messages with the match highlighted](docs/search.png) | ![The help screen listing keys by area](docs/help.png) |
+| ![The search layer: conversations found by name, the conversations that mention the words with a count each, and matching messages with the words highlighted](docs/search.png) | ![The help screen listing keys by area](docs/help.png) |
 
 These are the built-in demo (`fizz --demo`), which uses made-up
 conversations.
@@ -344,19 +344,22 @@ a picture or file to open it, click a message to select it.
 ## Search
 
 Press `/` in the chat list. A search layer opens over the app with one box
-and two kinds of result:
+and three kinds of result:
 
 - **Conversations:** every conversation on the server, however old, by
   name, group name, member or phone number, plus contacts you have never
   messaged (choosing one starts a new conversation).
+- **Mentioned in:** the conversations your words appear in, the one with
+  the most matching messages first, each with its count. Enter opens that
+  conversation at its newest match.
 - **Messages:** messages containing the words you typed, newest first, with
-  the words highlighted. Several words must all appear, and each matches
-  from its start, so "tomor" finds "tomorrow". Enter opens the
-  conversation at that message, with the history around it; `End` returns
-  to the latest messages.
+  the words highlighted and a count of how many there are in all. Several
+  words must all appear, and each matches from its start, so "tomor" finds
+  "tomorrow". Enter opens the conversation at that message, with the
+  history around it; `End` returns to the latest messages.
 
-Up and Down move, Enter opens, Esc closes. Pressing `/` again brings back
-your last search; `Ctrl+U` clears it.
+Up and Down move, Tab jumps to the next section, Enter opens, Esc closes.
+Pressing `/` again brings back your last search; `Ctrl+U` clears it.
 
 ### Searching message text
 
