@@ -1635,7 +1635,7 @@ fn draw_timeline(frame: &mut Frame, app: &mut App, chat: &Chat, view: Rect) {
                     }
                 }
                 Item::Image { guid, x, cols, .. } => {
-                    if let Some(ImageState::Ready(protocol)) = app.images.get(guid) {
+                    if let Some(protocol) = app.images.get(guid).and_then(ImageState::current) {
                         let at = SignedPosition::from((*x as i16, y as i16));
                         frame.render_widget(SlicedImage::new(protocol, at), view);
                     }
@@ -1888,7 +1888,7 @@ fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
             }
             let state = app.images.get(&attachment.guid);
             let visual = attachment.is_image() || attachment.is_video();
-            if let (true, Some(ImageState::Ready(protocol))) = (visual, state) {
+            if let (true, Some(protocol)) = (visual, state.and_then(ImageState::current)) {
                 let size = protocol.size();
                 let x = if mine {
                     (w as u16).saturating_sub(size.width)

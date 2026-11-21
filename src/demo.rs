@@ -72,6 +72,19 @@ impl Builder {
         self
     }
 
+    fn gif(&mut self, ago: i64, from: Option<&str>, name: &str) -> &mut Self {
+        let mut m = self.base(ago, from);
+        m.attachments = vec![Attachment {
+            guid: format!("demo-gif-{name}"),
+            mime_type: Some("image/gif".into()),
+            transfer_name: Some(format!("{name}.gif")),
+            total_bytes: Some(420_000),
+            ..Attachment::default()
+        }];
+        self.messages.push(m);
+        self
+    }
+
     fn file(&mut self, ago: i64, from: Option<&str>, name: &str, bytes: u64) -> &mut Self {
         let mut m = self.base(ago, from);
         m.attachments = vec![Attachment {
@@ -172,6 +185,7 @@ pub fn data() -> (
         .react(Some(theo), "emphasize")
         .react(Some(priya), "love")
         .photo(2 * HOUR, Some(priya), "lake", "")
+        .gif(118 * MINUTE, Some(theo), "sunrise")
         .say(2 * HOUR - MINUTE, Some(priya), "Found the spot from last year")
         .say(95 * MINUTE, Some(theo), "Perfect. Same picnic table?")
         .say(90 * MINUTE, Some(priya), "Same one");
@@ -243,8 +257,28 @@ pub fn people() -> Vec<(String, String)> {
     .to_vec()
 }
 
+/// A short generated animation, standing in for a GIF: the sun crossing
+/// the sky.
+pub fn animation(guid: &str, box_px: (u32, u32)) -> Vec<(DynamicImage, std::time::Duration)> {
+    const FRAMES: usize = 16;
+    (0..FRAMES)
+        .map(|i| {
+            let t = i as f32 / FRAMES as f32;
+            // An arc from left to right, highest in the middle.
+            let sun = (0.12 + 0.76 * t, 0.42 - 0.26 * (t * std::f32::consts::PI).sin());
+            (scene(guid, box_px, sun), std::time::Duration::from_millis(110))
+        })
+        .collect()
+}
+
 /// A generated landscape so the demo has pictures without shipping any.
 pub fn picture(guid: &str, box_px: (u32, u32)) -> DynamicImage {
+    scene(guid, box_px, (0.72, 0.28))
+}
+
+/// The landscape, with the sun at the given place (as fractions of the
+/// picture's width and height).
+fn scene(guid: &str, box_px: (u32, u32), sun_at: (f32, f32)) -> DynamicImage {
     let seed = guid.bytes().fold(7u32, |a, b| a.wrapping_mul(31) + u32::from(b));
     let (w, h) = (640u32, 420u32);
     let hue = (seed % 3) as usize;
@@ -253,7 +287,7 @@ pub fn picture(guid: &str, box_px: (u32, u32)) -> DynamicImage {
         // Sky gradient, a sun, and two ridgelines.
         let ridge1 = 0.62 + 0.10 * ((fx * 6.0 + seed as f32).sin()) + 0.04 * (fx * 23.0).sin();
         let ridge2 = 0.76 + 0.07 * ((fx * 4.0 + 1.3 + seed as f32).cos());
-        let sun = ((fx - 0.72).powi(2) + (fy - 0.28).powi(2) * 2.2).sqrt();
+        let sun = ((fx - sun_at.0).powi(2) + (fy - sun_at.1).powi(2) * 2.2).sqrt();
         let mut c = [
             0.95 - 0.55 * fy,
             0.55 + 0.15 * fy,

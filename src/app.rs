@@ -1,6 +1,5 @@
 //! Application state and everything that changes it.
 
-use image::DynamicImage;
 use ratatui::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -32,6 +31,9 @@ use crate::theme::Theme;
 /// The picker row that finishes a group, told apart from a person by this
 /// in place of an address.
 pub const START_GROUP: &str = "\u{1}start-group";
+
+/// How many GIFs play at once in a conversation.
+const PLAYING_GIFS: usize = 6;
 
 /// How many results of each kind the search layer shows.
 const SEARCH_CONVERSATIONS: usize = 8;
@@ -100,7 +102,7 @@ pub enum AppEvent {
     },
     Image {
         guid: String,
-        result: Result<DynamicImage, String>,
+        result: Result<images::Loaded, String>,
     },
     Theme(Theme),
     /// The answer to "is there already a chat with this person?".
@@ -288,6 +290,8 @@ pub struct App {
 
     pub convos: HashMap<String, Convo>,
     pub images: HashMap<String, ImageState>,
+    /// How many more GIFs may play in the open conversation.
+    gif_budget: usize,
     pub focus: Focus,
     /// The stats screen, and what it needs to show.
     pub stats: bool,
@@ -419,6 +423,7 @@ impl App {
             filtering: false,
             convos: HashMap::new(),
             images: HashMap::new(),
+            gif_budget: PLAYING_GIFS,
             focus: Focus::List,
             stats: false,
             info: None,
@@ -975,6 +980,7 @@ impl App {
             self.selected = None;
             // Pictures are kept only for the conversation on screen.
             self.images.clear();
+            self.gif_budget = PLAYING_GIFS;
         }
         self.mark_seen(guid);
         let convo = self.convos.entry(guid.to_string()).or_default();
@@ -1143,7 +1149,15 @@ impl App {
             u32::from(media.picture_columns) * u32::from(font.width),
             u32::from(media.picture_rows) * u32::from(font.height),
         );
-        for attachment in wanted {
+        // Every frame of a playing GIF is a picture held in memory, here
+        // and in the terminal, so only so many play at once in a
+        // conversation. The newest get the places; older ones show a still.
+        let can_animate = self.can_animate();
+        for attachment in wanted.into_iter().rev() {
+            let animate = can_animate && attachment.is_gif() && self.gif_budget > 0;
+            if animate {
+                self.gif_budget -= 1;
+            }
             let guid = attachment.guid.clone();
             match self.api.clone() {
                 Some(api) => {
@@ -1152,24 +1166,56 @@ impl App {
                         api,
                         attachment,
                         box_px,
+                        animate,
                         self.image_limit.clone(),
                         self.tx.clone(),
                     );
                 }
+                None if animate && attachment.is_gif() => {
+                    let frames = crate::demo::animation(&guid, box_px);
+                    self.set_image(guid, Ok(images::Loaded::Frames(frames)));
+                }
                 None => {
                     let picture = crate::demo::picture(&guid, box_px);
-                    self.set_image(guid, Ok(picture));
+                    self.set_image(guid, Ok(images::Loaded::Still(picture)));
                 }
             }
         }
     }
 
-    fn set_image(&mut self, guid: String, result: Result<DynamicImage, String>) {
-        let state = result
-            .ok()
-            .and_then(|img| SlicedProtocol::new(&self.picker, img, None).ok())
-            .map_or(ImageState::Failed, ImageState::Ready);
+    fn set_image(&mut self, guid: String, result: Result<images::Loaded, String>) {
+        let state = match result {
+            Ok(images::Loaded::Still(picture)) => SlicedProtocol::new(&self.picker, picture, None)
+                .map_or(ImageState::Failed, ImageState::Ready),
+            Ok(images::Loaded::Frames(frames)) => {
+                let (mut pictures, mut delays) = (Vec::new(), Vec::new());
+                for (picture, delay) in frames {
+                    if let Ok(protocol) = SlicedProtocol::new(&self.picker, picture, None) {
+                        pictures.push(protocol);
+                        delays.push(delay);
+                    }
+                }
+                if pictures.is_empty() {
+                    ImageState::Failed
+                } else {
+                    ImageState::Animated {
+                        frames: pictures,
+                        delays,
+                        started: Instant::now(),
+                    }
+                }
+            }
+            Err(_) => ImageState::Failed,
+        };
         self.images.insert(guid, state);
+    }
+
+    /// Whether GIFs can play here: the setting is on and the terminal
+    /// holds pictures by reference, so changing frame costs almost nothing.
+    fn can_animate(&self) -> bool {
+        use ratatui_image::picker::ProtocolType;
+        crate::config::settings().media.animate_gifs
+            && self.picker.protocol_type() == ProtocolType::Kitty
     }
 
     // ----- selecting messages, pictures and files ------------------------
@@ -1447,6 +1493,7 @@ impl App {
         if self.open.as_deref() == Some(guid) {
             self.open = None;
             self.images.clear();
+            self.gif_budget = PLAYING_GIFS;
             self.input.clear();
             self.focus = Focus::List;
         }
@@ -2672,6 +2719,16 @@ impl App {
     /// animating, otherwise only enough to expire status messages.
     pub fn tick_rate(&self) -> Duration {
         let typing = self.open.as_deref().is_some_and(|chat| self.is_typing(chat));
+        // A playing GIF sets the pace, but only while someone is looking.
+        let gif = self
+            .images
+            .values()
+            .filter_map(ImageState::frame_time)
+            .min()
+            .filter(|_| self.window_focused && !self.help && !self.stats && !self.filtering);
+        if let Some(frame) = gif {
+            return frame.clamp(Duration::from_millis(40), Duration::from_millis(250));
+        }
         if self.splash() || self.opening() {
             Duration::from_millis(110)
         } else if typing {
@@ -2731,7 +2788,7 @@ impl App {
         let pictures = self
             .images
             .values()
-            .filter(|state| matches!(state, ImageState::Ready(_)))
+            .filter(|state| state.current().is_some())
             .count();
         (
             self.chats.len(),

@@ -194,6 +194,9 @@ pub struct Media {
     pub pictures: bool,
     pub picture_columns: u16,
     pub picture_rows: u16,
+    /// Play GIFs in place, where the terminal makes that cheap (kitty,
+    /// Ghostty). Elsewhere they show their first frame.
+    pub animate_gifs: bool,
     pub video_stills: bool,
     pub video_still_limit_mb: u64,
     pub downloads: String,
@@ -298,6 +301,7 @@ impl Default for Media {
             pictures: true,
             picture_columns: 38,
             picture_rows: 14,
+            animate_gifs: true,
             video_stills: true,
             video_still_limit_mb: 40,
             downloads: "~/Downloads".into(),
@@ -383,6 +387,9 @@ pictures = true
 # The largest a picture may be drawn, in characters.
 picture_columns = 38
 picture_rows = 14
+# Play GIFs in place. This works in kitty and Ghostty; other terminals show
+# the first frame. They play only while the Fizz window is focused.
+animate_gifs = true
 # Show a still frame for videos (needs ffmpeg). The video is downloaded to
 # make it, so there is a size limit, in megabytes.
 video_stills = true

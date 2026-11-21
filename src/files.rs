@@ -536,10 +536,12 @@ pub fn read_clipboard() -> Result<Clipboard> {
 /// again if that conversation is opened.
 fn prune_thumbnails() {
     const KEEP: Duration = Duration::from_secs(90 * 24 * 3600);
-    let Ok(entries) = std::fs::read_dir(cache_dir().join("thumbs")) else {
-        return;
-    };
     let now = SystemTime::now();
+    // Thumbnails, and the GIFs kept whole so they can play.
+    let entries = ["thumbs", "gifs"]
+        .into_iter()
+        .filter_map(|folder| std::fs::read_dir(cache_dir().join(folder)).ok())
+        .flatten();
     for entry in entries.flatten() {
         let stale = entry
             .metadata()

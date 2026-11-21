@@ -59,6 +59,14 @@ impl Attachment {
             .is_some_and(|m| m.starts_with("video/"))
     }
 
+    pub fn is_gif(&self) -> bool {
+        self.mime_type.as_deref() == Some("image/gif")
+            || self
+                .transfer_name
+                .as_deref()
+                .is_some_and(|n| n.to_lowercase().ends_with(".gif"))
+    }
+
     pub fn is_image(&self) -> bool {
         self.mime_type
             .as_deref()

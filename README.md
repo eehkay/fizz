@@ -16,7 +16,8 @@ These are the built-in demo (`fizz --demo`), which uses made-up
 conversations.
 
 - Conversations, contact names, tapbacks, group chats, replies, link titles
-- Photos shown inline as real pixels, and a still frame for videos
+- Photos shown inline as real pixels, GIFs that play, and a still frame
+  for videos
 - Start new conversations, send text, files and pictures, insert emoji
 - Open or save any attachment, copy message text, open links
 - Search every conversation and contact by name, and messages by their words
@@ -209,8 +210,8 @@ its default written out, each with a comment. It covers:
 - **Appearance:** theme (`auto`, `terminal`, or a `colors.toml` path), 12 or
   24 hour clock, chat list width, conversation width, mouse on or off,
   blue and green bubbles by service
-- **Media:** inline pictures on or off, how large they are drawn, video
-  stills and their size limit, where files are saved
+- **Media:** inline pictures on or off, how large they are drawn, playing
+  GIFs, video stills and their size limit, where files are saved
 - **Messages:** default country code for new chats, send method, the emoji
   popup, how often to poll, whether to mark chats read on the server and
   whether to show others when you are typing
@@ -322,7 +323,10 @@ Creating a group needs the server's Private API helper.
 
 ## Pictures, video and files
 
-Pictures show inline. Videos up to 40 MB show a still frame (needs
+Pictures show inline, and GIFs play in place in kitty and Ghostty (the
+first frame elsewhere). They play while the Fizz window is focused, up to
+six at a time in a conversation; `animate_gifs = false` under `[media]`
+shows stills instead. Videos up to 40 MB show a still frame (needs
 `ffmpeg`); larger ones, voice messages and other files show as a named row.
 Opening one hands it to whatever app your desktop uses for that type (via
 `xdg-open`, or `open` on macOS). HEIC pictures arrive already converted to
