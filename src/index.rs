@@ -1,24 +1,22 @@
-//! A local copy of message text, so messages can be searched by what was
-//! said. The server cannot do this itself, so Fizz downloads the text once
-//! (newest first, in the background), keeps it up to date, and searches it
-//! here. Nothing is stored unless the user turns this on.
-//!
-//! The store is one line per message in a plain file. Searching reads the
-//! whole file and scans it, which for half a million messages takes a few
-//! hundredths of a second and needs no database.
+//! Keeping message text on this computer so messages can be searched by
+//! what was said. The server cannot do this itself, so Fizz downloads the
+//! text once (newest first, in the background), keeps it up to date, and
+//! searches it in its own database (see `store.rs`). Nothing is stored
+//! unless the user turns this on.
 
-use aho_corasick::AhoCorasick;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::api::Api;
 use crate::app::AppEvent;
 use crate::model::Message;
+use crate::store;
+
+pub use crate::store::Hit;
 
 /// Messages fetched per request while downloading history. Kept modest,
 /// with a pause between requests, because the server answers one thing at
@@ -26,49 +24,58 @@ use crate::model::Message;
 const PAGE: usize = 300;
 const PAUSE: Duration = Duration::from_millis(450);
 
-pub fn dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("fizz")
-        .join("index")
+const ENABLED_KEY: &str = "search_text";
+const PROGRESS_KEY: &str = "search_progress";
+
+/// Where the index lived before the database: a folder of text files.
+/// Still looked for, so an existing index is brought across.
+pub fn old_dir() -> PathBuf {
+    store::folder().join("index")
 }
 
-fn messages_path() -> PathBuf {
-    dir().join("messages.tsv")
-}
+/// Whether the user has said yes to keeping message text. Asked on every
+/// frame, so the answer is remembered rather than read from disk each time
+/// (0 = not looked up yet, 1 = off, 2 = on).
+static ENABLED: AtomicU8 = AtomicU8::new(0);
 
-fn chats_path() -> PathBuf {
-    dir().join("chats.txt")
-}
-
-fn state_path() -> PathBuf {
-    dir().join("state.json")
-}
-
-/// The user has said yes to keeping message text on this computer.
 pub fn enabled() -> bool {
-    dir().join("enabled").exists()
+    match ENABLED.load(Ordering::Relaxed) {
+        0 => {
+            let on = old_dir().join("enabled").exists()
+                || (store::path().exists()
+                    && store::open()
+                        .ok()
+                        .and_then(|conn| store::state(&conn, ENABLED_KEY))
+                        .is_some_and(|v| v == "1"));
+            ENABLED.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+            on
+        }
+        state => state == 2,
+    }
 }
 
 pub fn enable() -> Result<()> {
-    let dir = dir();
-    std::fs::create_dir_all(&dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
-    std::fs::write(dir.join("enabled"), "")?;
+    let conn = store::open()?;
+    store::set_state(&conn, ENABLED_KEY, "1")?;
+    ENABLED.store(2, Ordering::Relaxed);
     Ok(())
 }
 
 /// Remove the stored message text and turn the feature off.
 pub fn delete() -> Result<()> {
-    match std::fs::remove_dir_all(dir()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).context("couldn't remove the search index"),
+    if store::path().exists() {
+        let conn = store::open()?;
+        store::clear_messages(&conn)?;
+        store::set_state(&conn, ENABLED_KEY, "0")?;
+        store::set_state(&conn, PROGRESS_KEY, "")?;
     }
+    match std::fs::remove_dir_all(old_dir()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("couldn't remove the old search index"),
+    }
+    ENABLED.store(1, Ordering::Relaxed);
+    Ok(())
 }
 
 /// How far the download has got.
@@ -90,18 +97,25 @@ pub struct Progress {
 
 impl Progress {
     pub fn load() -> Self {
-        std::fs::read(state_path())
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        let from_store = store::path()
+            .exists()
+            .then(|| store::open().ok())
+            .flatten()
+            .and_then(|conn| store::state(&conn, PROGRESS_KEY))
+            .and_then(|json| serde_json::from_str(&json).ok());
+        from_store
+            .or_else(|| {
+                // Not brought across yet: the old folder's own record.
+                std::fs::read(old_dir().join("state.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            })
             .unwrap_or_default()
     }
 
-    fn save(&self) {
-        if let Ok(json) = serde_json::to_vec(self) {
-            let tmp = state_path().with_extension("tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(tmp, state_path());
-            }
+    fn save(&self, conn: &rusqlite::Connection) {
+        if let Ok(json) = serde_json::to_string(self) {
+            let _ = store::set_state(conn, PROGRESS_KEY, &json);
         }
     }
 
@@ -114,114 +128,50 @@ impl Progress {
     }
 }
 
-fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => {}
-            other => out.push(other),
-        }
+/// Bring an index kept as text files into the database. Returns what was
+/// found, or `None` if there was nothing to bring. The old files are
+/// removed afterwards, unless `keep` or any message failed to arrive.
+pub fn upgrade(keep: bool) -> Result<Option<store::Imported>> {
+    let old = old_dir();
+    if !old.join("messages.tsv").exists() {
+        return Ok(None);
     }
-    out
-}
-
-fn unescape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some(other) => out.push(other),
-            None => {}
-        }
+    let mut conn = store::open()?;
+    let imported = store::import_text_index(&mut conn, &old)?;
+    // Carry over how far the download had got, and that it was wanted.
+    let progress = Progress::load();
+    Progress {
+        stored: store::message_count(&conn),
+        ..progress
     }
-    out
+    .save(&conn);
+    store::set_state(&conn, ENABLED_KEY, "1")?;
+    ENABLED.store(2, Ordering::Relaxed);
+    if imported.missing > 0 {
+        crate::config::log(&format!(
+            "search index upgrade: {} messages did not arrive; the old index is kept",
+            imported.missing
+        ));
+    } else if !keep {
+        let _ = std::fs::remove_dir_all(&old);
+    }
+    Ok(Some(imported))
 }
 
-/// Appends messages to the store, numbering chats so each line stays short.
-struct Writer {
-    file: std::fs::File,
-    chats: HashMap<String, usize>,
-    chats_file: std::fs::File,
-}
-
-impl Writer {
-    fn open() -> Result<Self> {
-        std::fs::create_dir_all(dir())?;
-        let open = |path: PathBuf| {
-            let mut options = std::fs::OpenOptions::new();
-            options.create(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            options.open(path)
-        };
-        let known = std::fs::read_to_string(chats_path()).unwrap_or_default();
-        let chats = known
-            .lines()
-            .enumerate()
-            .map(|(i, guid)| (guid.to_string(), i))
-            .collect();
-        Ok(Writer {
-            file: open(messages_path())?,
-            chats,
-            chats_file: open(chats_path())?,
+fn store_page(conn: &mut rusqlite::Connection, messages: &[Message]) -> Result<u64> {
+    let owned = store::rows_from(messages);
+    let rows: Vec<store::Row> = owned
+        .iter()
+        .map(|(guid, chat, date, from_me, sender, text)| store::Row {
+            guid,
+            chat,
+            date: *date,
+            from_me: *from_me,
+            sender,
+            text,
         })
-    }
-
-    fn chat_number(&mut self, guid: &str) -> Result<usize> {
-        if let Some(n) = self.chats.get(guid) {
-            return Ok(*n);
-        }
-        let n = self.chats.len();
-        writeln!(self.chats_file, "{guid}")?;
-        self.chats.insert(guid.to_string(), n);
-        Ok(n)
-    }
-
-    /// Store what is worth searching; returns how many lines were written.
-    fn add(&mut self, messages: &[Message]) -> Result<u64> {
-        let mut out = String::new();
-        let mut written = 0;
-        for m in messages {
-            // Tapbacks ("Loved …") and events are not things people said.
-            if m.reaction().is_some() || m.item_type != 0 {
-                continue;
-            }
-            let text = m.body();
-            let Some(chat) = m.chats.first() else { continue };
-            if text.is_empty() || chat.guid.is_empty() {
-                continue;
-            }
-            let chat = self.chat_number(&chat.guid)?;
-            let who = match (&m.handle, m.is_from_me) {
-                (_, true) => "",
-                (Some(h), false) => h.address.as_str(),
-                (None, false) => "",
-            };
-            out.push_str(&format!(
-                "{}\t{chat}\t{}\t{}\t{}\t{}\n",
-                m.date_created,
-                if m.is_from_me { 'm' } else { 't' },
-                escape(who),
-                escape(&m.guid),
-                escape(&text),
-            ));
-            written += 1;
-        }
-        self.file.write_all(out.as_bytes())?;
-        Ok(written)
-    }
+        .collect();
+    store::put(conn, &rows)
 }
 
 /// Keep the store complete: catch up on anything newer than what is held,
@@ -232,7 +182,18 @@ pub async fn run(
     mut live: UnboundedReceiver<Message>,
     max_pages: Option<usize>,
 ) -> Result<()> {
-    let mut writer = Writer::open()?;
+    // An index from before the database: bring it across first. Half a
+    // million messages take a few seconds, so do it off the async threads.
+    if old_dir().join("messages.tsv").exists() {
+        let _ = tx.send(AppEvent::Status("Upgrading the search index…".into()));
+        match tokio::task::spawn_blocking(|| upgrade(false)).await? {
+            Ok(_) => {
+                let _ = tx.send(AppEvent::Status("Search index upgraded".into()));
+            }
+            Err(e) => crate::config::log(&format!("search index upgrade failed: {e:#}")),
+        }
+    }
+    let mut conn = store::open()?;
     let mut progress = Progress::load();
     let report = |p: &Progress| {
         let _ = tx.send(AppEvent::Indexing(p.clone()));
@@ -245,15 +206,10 @@ pub async fn run(
         let page = api.history(None, Some(progress.newest), PAGE).await?;
         let got = page.len();
         if let Some(latest) = page.iter().map(|m| m.date_created).max() {
-            // The boundary message comes back again; do not count it twice.
-            let fresh: Vec<Message> = page
-                .into_iter()
-                .filter(|m| m.date_created > progress.newest)
-                .collect();
-            progress.stored += writer.add(&fresh)?;
+            progress.stored += store_page(&mut conn, &page)?;
             progress.newest = progress.newest.max(latest);
         }
-        progress.save();
+        progress.save(&conn);
         report(&progress);
         if got < PAGE {
             break;
@@ -268,7 +224,7 @@ pub async fn run(
     while !progress.complete {
         if cutoff.is_some_and(|cutoff| progress.oldest > 0 && progress.oldest < cutoff) {
             progress.complete = true;
-            progress.save();
+            progress.save(&conn);
             report(&progress);
             break;
         }
@@ -285,7 +241,7 @@ pub async fn run(
             progress.complete = true;
         } else {
             progress.scanned += page.len() as u64;
-            progress.stored += writer.add(&page)?;
+            progress.stored += store_page(&mut conn, &page)?;
             let oldest = page.iter().map(|m| m.date_created).min().unwrap_or(0);
             let newest = page.iter().map(|m| m.date_created).max().unwrap_or(0);
             progress.oldest = if progress.oldest == 0 { oldest } else { progress.oldest.min(oldest) };
@@ -294,7 +250,7 @@ pub async fn run(
                 progress.complete = true;
             }
         }
-        progress.save();
+        progress.save(&conn);
         report(&progress);
         // Leave the server room to serve the app itself.
         tokio::time::sleep(PAUSE).await;
@@ -303,145 +259,35 @@ pub async fn run(
         return Ok(());
     }
 
-    // From here on, store messages as the app hears about them.
+    // From here on, keep in step with what the app hears: new messages are
+    // added, an edited one has its text replaced, an unsent one is removed.
     while let Some(message) = live.recv().await {
-        if message.date_created > progress.newest {
-            progress.stored += writer.add(std::slice::from_ref(&message))?;
-            progress.newest = message.date_created;
-            progress.save();
+        if message.date_retracted.is_some() {
+            store::remove(&conn, &message.guid);
+            continue;
         }
+        progress.stored += store_page(&mut conn, std::slice::from_ref(&message))?;
+        if message.date_created > progress.newest {
+            progress.newest = message.date_created;
+        }
+        progress.save(&conn);
     }
     Ok(())
 }
 
-/// One message found by a search.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Hit {
-    pub chat: String,
-    pub guid: String,
-    pub date: i64,
-    pub from_me: bool,
-    pub sender: String,
-    pub text: String,
-}
-
-/// Find messages containing every word of `query`, newest first. Case is
-/// ignored for plain letters. Blocking: call it off the UI thread.
+/// Find messages containing every word of `query`, newest first. Words
+/// match from their start and case and accents are ignored. Blocking:
+/// call it off the UI thread.
 pub fn search(query: &str, limit: usize) -> Result<Vec<Hit>> {
-    let words: Vec<String> = query
-        .split_whitespace()
-        .map(|w| w.to_lowercase())
-        .filter(|w| !w.is_empty())
-        .collect();
-    let Some(longest) = words.iter().max_by_key(|w| w.len()) else {
+    if !store::path().exists() {
         return Ok(Vec::new());
-    };
-    let Ok(data) = std::fs::read(messages_path()) else {
-        return Ok(Vec::new());
-    };
-    let chats: Vec<String> = std::fs::read_to_string(chats_path())
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect();
-    let finder = AhoCorasick::builder()
-        .ascii_case_insensitive(true)
-        .build([longest.as_str()])
-        .context("couldn't prepare the search")?;
-
-    // Scan for the longest word, which rules out the most; check the rest
-    // only on lines where it was found.
-    let mut found: Vec<(i64, usize, usize)> = Vec::new();
-    let mut last_line_end = 0;
-    for hit in finder.find_iter(&data) {
-        if hit.start() < last_line_end {
-            continue; // Another match on a line already taken.
-        }
-        let start = data[..hit.start()]
-            .iter()
-            .rposition(|b| *b == b'\n')
-            .map_or(0, |i| i + 1);
-        let Some(end) = data[hit.start()..].iter().position(|b| *b == b'\n') else {
-            break; // A line still being written.
-        };
-        let end = hit.start() + end;
-        last_line_end = end;
-        // The match has to be in the text, which is the last field.
-        let line = &data[start..end];
-        let Some(text_at) = line.iter().rposition(|b| *b == b'\t') else {
-            continue;
-        };
-        if hit.start() < start + text_at + 1 {
-            continue;
-        }
-        if words.len() > 1 {
-            let text = String::from_utf8_lossy(&line[text_at + 1..]).to_lowercase();
-            if !words.iter().all(|w| text.contains(w.as_str())) {
-                continue;
-            }
-        }
-        let date = line
-            .iter()
-            .position(|b| *b == b'\t')
-            .and_then(|i| std::str::from_utf8(&line[..i]).ok())
-            .and_then(|d| d.parse::<i64>().ok())
-            .unwrap_or(0);
-        found.push((date, start, end));
     }
-    found.sort_by_key(|(date, ..)| std::cmp::Reverse(*date));
-
-    let mut hits: Vec<Hit> = Vec::new();
-    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (date, start, end) in found {
-        if hits.len() >= limit {
-            break;
-        }
-        let line = String::from_utf8_lossy(&data[start..end]);
-        let mut fields = line.splitn(6, '\t');
-        let (_, chat, who, sender, guid, text) = (
-            fields.next(),
-            fields.next().and_then(|c| c.parse::<usize>().ok()),
-            fields.next().unwrap_or(""),
-            fields.next().unwrap_or(""),
-            fields.next().unwrap_or(""),
-            fields.next().unwrap_or(""),
-        );
-        let Some(chat) = chat.and_then(|n| chats.get(n)) else {
-            continue;
-        };
-        let guid = unescape(guid);
-        // The same message can be stored twice at a page boundary.
-        if !taken.insert(guid.clone()) {
-            continue;
-        }
-        hits.push(Hit {
-            chat: chat.clone(),
-            guid,
-            date,
-            from_me: who == "m",
-            sender: unescape(sender),
-            text: unescape(text),
-        });
-    }
-    Ok(hits)
-}
-
-/// Size of the store on disk, in bytes.
-pub fn size_on_disk() -> u64 {
-    crate::metrics::folder_size(&dir())
+    store::search(&store::open()?, query, limit)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn text_survives_the_file_format() {
-        for text in ["plain", "tab\there", "two\nlines", "back\\slash", "mix\\n\t\n\\"] {
-            assert_eq!(unescape(&escape(text)), text);
-            assert!(!escape(text).contains('\n') && !escape(text).contains('\t'));
-        }
-    }
 
     #[test]
     fn progress_reports_sensible_percentages() {

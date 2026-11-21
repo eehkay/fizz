@@ -669,14 +669,10 @@ fn draw_stats(frame: &mut Frame, app: &mut App, area: Rect) {
     ];
     if let Some((thumbs, files, index)) = app.cache_sizes {
         data.push(row(
-            "On disk",
-            format!(
-                "pictures {} · files {} · search {}",
-                file_size(thumbs),
-                file_size(files),
-                file_size(index)
-            ),
+            "Caches",
+            format!("pictures {} · files {}", file_size(thumbs), file_size(files)),
         ));
+        data.push(row("Database", file_size(index)));
     }
     if let Some(p) = &app.indexing {
         data.push(row(

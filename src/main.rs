@@ -13,6 +13,7 @@ mod input;
 mod live;
 mod metrics;
 mod model;
+mod store;
 mod theme;
 mod update;
 mod ui;
@@ -219,9 +220,34 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
     if let Some(i) = args.iter().position(|a| a == "count") {
         // How many messages contain these words, and how long finding out took.
         let query = args[i + 1..].join(" ");
+        let conn = store::open()?;
         let started = std::time::Instant::now();
-        let hits = index::search(&query, 100_000)?;
-        println!("{} messages in {} ms", hits.len(), started.elapsed().as_millis());
+        let matching = store::count_matching(&conn, &query)?;
+        let counted = started.elapsed();
+        // What the search screen does: the newest eighty, with their text.
+        let started = std::time::Instant::now();
+        let shown = store::search(&conn, &query, 80)?.len();
+        println!(
+            "{matching} messages (counted in {} ms; the newest {shown} fetched in {} ms)",
+            counted.as_millis(),
+            started.elapsed().as_millis()
+        );
+        return Ok(());
+    }
+    if has("upgrade") {
+        // Bring an index kept as text files into the database. Normally
+        // this happens by itself the next time Fizz starts.
+        let started = std::time::Instant::now();
+        match index::upgrade(has("--keep"))? {
+            Some(found) => println!(
+                "Read {} messages: {} new, {} missing afterwards ({} ms)",
+                found.read,
+                found.added,
+                found.missing,
+                started.elapsed().as_millis()
+            ),
+            None => println!("There is no old index to bring across."),
+        }
         return Ok(());
     }
     if !index::enabled() {
@@ -230,7 +256,8 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
         return Ok(());
     }
     let p = index::Progress::load();
-    println!("Stored    {} messages", p.stored);
+    let stored = store::open().map(|conn| store::message_count(&conn)).unwrap_or(p.stored);
+    println!("Stored    {stored} messages");
     println!(
         "Progress  {}",
         match (p.complete, p.percent()) {
@@ -239,7 +266,14 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
             (false, None) => "just started".to_string(),
         }
     );
-    println!("On disk   {:.1} MB in {}", index::size_on_disk() as f64 / 1e6, index::dir().display());
+    println!(
+        "On disk   {:.1} MB in {}",
+        store::size_on_disk() as f64 / 1e6,
+        store::path().display()
+    );
+    if index::old_dir().join("messages.tsv").exists() {
+        println!("          (an older text index is still present and will be brought across)");
+    }
     println!("\nRemove it and turn it off with: fizz index delete");
     Ok(())
 }

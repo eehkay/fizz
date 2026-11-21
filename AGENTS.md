@@ -75,9 +75,9 @@ update banner. Do this only when the owner asks for a release.
   `fizz --snapshot 120x36` to print one frame as plain text (useful,
   since you cannot drive a full-screen terminal app directly). Do not
   capture or print the user's real conversations.
-- **The search index is the user's messages.** `~/.local/share/fizz/index`
+- **The database is the user's messages.** `~/.local/share/fizz/fizz.db`
   holds the text of their messages once they turn word search on. Do not
-  read, print or copy it. `fizz index` and `fizz index count <words>`
+  read, print or copy it, and do not open it with `sqlite3` to look around. `fizz index` and `fizz index count <words>`
   report sizes and counts without showing any text.
 - **So is the startup snapshot.** `~/.local/state/fizz/snapshot.json`
   holds the chat list and recent conversations from the last run. Treat it
@@ -104,7 +104,8 @@ update banner. Do this only when the owner asks for a release.
   - `config.rs`: server details and the settings file
   - `theme.rs`: colours, including following the Omarchy theme
   - `codes.rs`: spotting one-time codes in message text
-  - `index.rs`: the local copy of message text and searching it
+  - `store.rs`: the SQLite database (tables, search, read markers)
+  - `index.rs`: downloading message text into it and keeping it current
   - `metrics.rs`: timings and usage for the stats screen
   - `update.rs`: finding a newer release or commit, the banner's source,
     and `fizz update` for both kinds of install

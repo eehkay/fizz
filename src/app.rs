@@ -403,6 +403,8 @@ pub struct App {
     /// Chats shown from memory that the server has not yet confirmed.
     unconfirmed: HashSet<String>,
     last_saved: Instant,
+    /// Fizz's database, for the small things written as you go.
+    store: Option<rusqlite::Connection>,
     /// Whether the server can be told a chat was read.
     helper: bool,
     /// Chats already marked read on the server this run, with the newest
@@ -510,6 +512,7 @@ impl App {
             draft_files: HashMap::new(),
             unread: HashSet::new(),
             seen: HashMap::new(),
+            store: None,
             recent_opens: Vec::new(),
             stale: HashSet::new(),
             unconfirmed: HashSet::new(),
@@ -568,8 +571,19 @@ impl App {
             self.indexing = Some(crate::index::Progress::load());
             self.start_index();
         }
-        if let Ok(bytes) = std::fs::read(Self::seen_path()) {
-            self.seen = serde_json::from_slice(&bytes).unwrap_or_default();
+        // Read markers live in the database. Ones kept in a file by an
+        // older version are moved across, and the file removed.
+        self.store = crate::store::open()
+            .map_err(|e| crate::config::log(&format!("database unavailable: {e:#}")))
+            .ok();
+        if let Some(conn) = &self.store {
+            if let Ok(bytes) = std::fs::read(Self::seen_path()) {
+                let old: HashMap<String, i64> = serde_json::from_slice(&bytes).unwrap_or_default();
+                if old.iter().all(|(chat, at)| crate::store::set_seen(conn, chat, *at).is_ok()) {
+                    let _ = std::fs::remove_file(Self::seen_path());
+                }
+            }
+            self.seen = crate::store::seen(conn);
         }
         if let Some(api) = self.api.clone() {
             let tx = self.tx.clone();
@@ -690,17 +704,9 @@ impl App {
         self.seen.insert(guid.to_string(), now);
         let Some(api) = self.api.clone() else { return };
         if was_unread
-            && let Ok(json) = serde_json::to_vec(&self.seen)
+            && let Some(conn) = &self.store
         {
-            let path = Self::seen_path();
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            // Write then rename, so a crash never leaves half a file.
-            let tmp = path.with_extension("tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+            let _ = crate::store::set_seen(conn, guid, now);
         }
         // Tell the server too. This must not depend on what Fizz itself
         // remembers: a chat read here before the helper existed is still
@@ -2472,6 +2478,9 @@ impl App {
                 Ok(()) => {
                     self.forget_chat(&chat);
                     self.seen.remove(&chat);
+                    if let Some(conn) = &self.store {
+                        crate::store::forget_seen(conn, &chat);
+                    }
                     self.set_status("Conversation deleted".into());
                 }
                 Err(e) if e.contains("Helper is not connected") => self.set_status(
@@ -3064,7 +3073,7 @@ impl App {
             self.cache_sizes = Some((
                 metrics::folder_size(&cache.join("thumbs")),
                 metrics::folder_size(&cache.join("files")),
-                crate::index::size_on_disk(),
+                crate::store::size_on_disk(),
             ));
         }
     }

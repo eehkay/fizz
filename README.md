@@ -294,7 +294,8 @@ and two kinds of result:
   name, group name, member or phone number, plus contacts you have never
   messaged (choosing one starts a new conversation).
 - **Messages:** messages containing the words you typed, newest first, with
-  the words highlighted. Several words must all appear. Enter opens the
+  the words highlighted. Several words must all appear, and each matches
+  from its start, so "tomor" finds "tomorrow". Enter opens the
   conversation at that message, with the history around it; `End` returns
   to the latest messages.
 
@@ -308,8 +309,11 @@ your message text kept on this computer. It is off until you press `Ctrl+B`
 in the search layer.
 
 - **What it stores:** the text of each message, who sent it and when, in
-  `~/.local/share/fizz/index`, readable only by you. No pictures or files.
-- **How big:** roughly 15 MB for every 100,000 messages.
+  Fizz's database (`~/.local/share/fizz/fizz.db`), readable only by you.
+  No pictures or files.
+- **How big:** roughly 14 MB for every 100,000 messages.
+- **It stays in step:** an edited message is found by its new text, and an
+  unsent one stops being found.
 - **How long:** it downloads in the background, newest first, a few hundred
   messages at a time so the app stays responsive. Half a million messages
   takes around half an hour, and you can search what has arrived so far.
@@ -543,6 +547,20 @@ patched (OpenCore) Macs, which differ.
    It should print `Private API on`. "Enabled, helper not connected" means
    the switch is on but the helper did not load, which usually means SIP
    is still on (`csrutil status` on the Mac tells you).
+
+## What Fizz keeps on your computer
+
+| What | Where |
+| --- | --- |
+| Server address and password | `~/.config/fizz/env` |
+| Settings | `~/.config/fizz/config.toml` |
+| Database: read markers, and message text if you turned on word search | `~/.local/share/fizz/fizz.db` |
+| The last session, for instant startup | `~/.local/state/fizz/snapshot.json` |
+| Picture thumbnails, GIFs, opened files | `~/.cache/fizz/` |
+
+The database is ordinary SQLite, unencrypted and readable only by you,
+which is how Messages keeps its own database on a Mac. Anything under
+`~/.cache/fizz` can be deleted at any time.
 
 ## Good to know
 
