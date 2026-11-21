@@ -183,6 +183,9 @@ pub struct Appearance {
     pub list_width: u16,
     pub conversation_width: u16,
     pub mouse: bool,
+    /// Colour your own bubbles by service: blue for iMessage, green for
+    /// SMS and RCS.
+    pub service_colors: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -284,6 +287,7 @@ impl Default for Appearance {
             list_width: 34,
             conversation_width: 110,
             mouse: true,
+            service_colors: true,
         }
     }
 }
@@ -368,6 +372,10 @@ list_width = 34
 conversation_width = 110
 # Mouse clicks and wheel. Turn off to select text with the mouse as usual.
 mouse = true
+# Colour your own messages by how they were sent: blue for iMessage, green
+# for SMS and RCS, using the theme's blue and green. When false they all
+# use the theme's accent colour.
+service_colors = true
 
 [media]
 # Show pictures inline. When false they appear as a named row you can open.

@@ -21,6 +21,37 @@ pub struct Attachment {
     pub hide_attachment: bool,
 }
 
+/// How a message travels: Apple's own service, or the phone network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Service {
+    IMessage,
+    Sms,
+    Rcs,
+}
+
+impl Service {
+    pub fn label(self) -> &'static str {
+        match self {
+            Service::IMessage => "iMessage",
+            Service::Sms => "SMS",
+            Service::Rcs => "RCS",
+        }
+    }
+}
+
+impl Handle {
+    /// The service the server recorded for this address, if it is one we
+    /// know.
+    pub fn service_kind(&self) -> Option<Service> {
+        match self.service.as_deref()?.to_lowercase().as_str() {
+            "imessage" => Some(Service::IMessage),
+            "sms" => Some(Service::Sms),
+            "rcs" => Some(Service::Rcs),
+            _ => None,
+        }
+    }
+}
+
 impl Attachment {
     pub fn is_video(&self) -> bool {
         self.mime_type

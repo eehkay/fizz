@@ -207,7 +207,8 @@ its default written out, each with a comment. It covers:
 - **Notifications:** on or off, whether they show the message text, and an
   optional sound
 - **Appearance:** theme (`auto`, `terminal`, or a `colors.toml` path), 12 or
-  24 hour clock, chat list width, conversation width, mouse on or off
+  24 hour clock, chat list width, conversation width, mouse on or off,
+  blue and green bubbles by service
 - **Media:** inline pictures on or off, how large they are drawn, video
   stills and their size limit, where files are saved
 - **Messages:** default country code for new chats, send method, the emoji
@@ -351,6 +352,18 @@ conversation is open. They appear above the message box; Enter sends them,
 followed by whatever you typed. This works in any terminal that pastes the
 path of a dropped file, which most do. `Ctrl+V` attaches a picture from the
 clipboard (Wayland, needs `wl-clipboard`).
+
+## Blue and green bubbles
+
+Your own messages are coloured by how they were sent, as on a phone: blue
+for iMessage, green for SMS and RCS. The colours are your theme's own blue
+and green, so they change with it. The message box says which kind the next
+message will be ("iMessage to Maya", "Text message (SMS) to Dana").
+
+The server records the service on everything you receive and on some of
+what you send; for the rest Fizz goes by the neighbouring messages in the
+conversation. Set `service_colors = false` under `[appearance]` to use the
+theme's accent colour for everything instead.
 
 ## One-time codes
 

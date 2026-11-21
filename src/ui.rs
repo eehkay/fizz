@@ -12,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Convo, Focus};
 use crate::images::ImageState;
-use crate::model::{Chat, Message, TAPBACKS};
+use crate::model::{Chat, Message, Service, TAPBACKS};
 use crate::theme::Theme;
 
 const NARROW: u16 = 76;
@@ -1353,7 +1353,17 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
         let hint = if chip_rows > 0 {
             "Add a message, or press Enter to send".to_string()
         } else {
-            format!("Message {name} · drop a file here to attach it")
+            // Say what kind of message this will be, as a phone does.
+            let kind = app
+                .convos
+                .get(&chat.guid)
+                .and_then(|convo| services_of(convo, &chat).last().copied().flatten());
+            let lead = match kind {
+                Some(Service::IMessage) => format!("iMessage to {name}"),
+                Some(other) => format!("Text message ({}) to {name}", other.label()),
+                None => format!("Message {name}"),
+            };
+            format!("{lead} · drop a file here to attach it")
         };
         let hint = truncate(&hint, usize::from(inner.width));
         frame.render_widget(
@@ -1685,6 +1695,56 @@ fn draw_timeline(frame: &mut Frame, app: &mut App, chat: &Chat, view: Rect) {
     app.wants_newer = wants_newer;
 }
 
+/// The service each message went by. The server says so for what you
+/// receive and for some of what you send; the rest take it from the
+/// nearest message in the conversation that has it, then from who the
+/// conversation is with.
+pub fn services_of(convo: &Convo, chat: &Chat) -> Vec<Option<Service>> {
+    let mut services: Vec<Option<Service>> = convo
+        .messages
+        .iter()
+        .map(|m| m.handle.as_ref().and_then(|h| h.service_kind()))
+        .collect();
+    // Forwards: a conversation carries on in the service it was using.
+    let mut last = None;
+    for service in &mut services {
+        match service {
+            Some(known) => last = Some(*known),
+            None => *service = last,
+        }
+    }
+    // Backwards, for anything before the first known one.
+    let mut next = None;
+    for service in services.iter_mut().rev() {
+        match service {
+            Some(known) => next = Some(*known),
+            None => *service = next,
+        }
+    }
+    if services.iter().any(Option::is_none) {
+        // Nothing in the conversation says: go by its members. A group
+        // with anyone on the phone network is a text group.
+        let members: Vec<Service> = chat
+            .participants
+            .iter()
+            .filter_map(|p| p.service_kind())
+            .collect();
+        let fallback = if members.is_empty() {
+            None
+        } else if members.iter().all(|s| *s == Service::IMessage) {
+            Some(Service::IMessage)
+        } else {
+            members.iter().copied().find(|s| *s != Service::IMessage)
+        };
+        if let Some(fallback) = fallback {
+            for service in &mut services {
+                service.get_or_insert(fallback);
+            }
+        }
+    }
+    services
+}
+
 /// Turn a conversation into rows for a view `w` cells wide.
 fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
     let theme = &app.theme;
@@ -1698,7 +1758,9 @@ fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
     let mut previous: Option<&Message> = None;
     let last_guid = convo.messages.last().map(|m| m.guid.as_str());
 
-    for message in &convo.messages {
+    let by_service = crate::config::settings().appearance.service_colors;
+    let services = services_of(convo, chat);
+    for (position, message) in convo.messages.iter().enumerate() {
         let mine = message.is_from_me;
         let new_day = previous
             .is_none_or(|p| local(p.date_created).date_naive() != local(message.date_created).date_naive());
@@ -1767,10 +1829,11 @@ fn build_items(app: &App, chat: &Chat, convo: &Convo, w: u16) -> Vec<Item> {
             }
         }
 
-        let (bubble_bg, bubble_fg) = if mine {
-            (theme.accent, theme.on_accent)
-        } else {
-            (theme.surface, theme.bright)
+        let (bubble_bg, bubble_fg) = match (mine, services[position]) {
+            (false, _) => (theme.surface, theme.bright),
+            (true, Some(Service::IMessage)) if by_service => (theme.imessage, theme.on_imessage),
+            (true, Some(Service::Sms | Service::Rcs)) if by_service => (theme.sms, theme.on_sms),
+            (true, _) => (theme.accent, theme.on_accent),
         };
         let mut bubble_style = Style::new().fg(bubble_fg).bg(bubble_bg);
         if message.pending {

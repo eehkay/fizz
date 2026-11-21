@@ -22,6 +22,12 @@ pub struct Theme {
     pub red: Color,
     pub green: Color,
     pub yellow: Color,
+    /// Bubble colours by service: blue for iMessage, green for SMS and
+    /// RCS, each with a text colour that reads on it.
+    pub imessage: Color,
+    pub on_imessage: Color,
+    pub sms: Color,
+    pub on_sms: Color,
 }
 
 type Rgb = (u8, u8, u8);
@@ -75,6 +81,10 @@ impl Theme {
             red: Color::Red,
             green: Color::Green,
             yellow: Color::Yellow,
+            imessage: Color::Blue,
+            on_imessage: Color::Black,
+            sms: Color::Green,
+            on_sms: Color::Black,
         }
     }
 
@@ -99,11 +109,20 @@ impl Theme {
             surface = mix(bg, fg, 0.12);
         }
         let bright = get("bright_foreground").unwrap_or(fg);
-        let on_accent = if contrast(bg, accent) >= contrast(bright, accent) {
-            bg
-        } else {
-            bright
+        // Whichever of the theme's darkest and lightest reads better on a
+        // given colour.
+        let readable_on = |fill: Rgb| {
+            if contrast(bg, fill) >= contrast(bright, fill) {
+                bg
+            } else {
+                bright
+            }
         };
+        let on_accent = readable_on(accent);
+        // The theme's own blue and green, falling back to the familiar
+        // ones where a theme does not name them.
+        let blue = get("blue").unwrap_or((0x0b, 0x84, 0xfe));
+        let green = get("green").unwrap_or((0x34, 0xc7, 0x59));
 
         Some(Theme {
             name: name.to_string(),
@@ -116,6 +135,10 @@ impl Theme {
             red: get("red").map_or(Color::Red, rgb),
             green: get("green").map_or(Color::Green, rgb),
             yellow: get("yellow").map_or(Color::Yellow, rgb),
+            imessage: rgb(blue),
+            on_imessage: rgb(readable_on(blue)),
+            sms: rgb(green),
+            on_sms: rgb(readable_on(green)),
         })
     }
 

@@ -184,11 +184,17 @@ pub fn data() -> (
     b.messages.last_mut().unwrap().date_read = None;
     convos.push((vec![sam], None, b));
 
+    // Dana is on a phone that texts, so this one shows the green bubbles.
     let mut b = Builder::new("demo;-;dana");
     b.say(50 * HOUR, Some(dana), "Happy birthday!! 🎉")
         .say(49 * HOUR, None, "Thank you! Dinner soon?")
         .say(49 * HOUR - 10 * MINUTE, Some(dana), "Yes please. Thursday?")
         .say(48 * HOUR, None, "Thursday works");
+    for m in &mut b.messages {
+        if let Some(h) = &mut m.handle {
+            h.service = Some("SMS".into());
+        }
+    }
     convos.push((vec![dana], None, b));
 
     let mut b = Builder::new("demo;-;code");
