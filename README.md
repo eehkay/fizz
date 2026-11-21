@@ -6,6 +6,10 @@ iMessage in your terminal, through a [BlueBubbles](https://bluebubbles.app) serv
 [Ghostty](https://ghostty.org),** where pictures show inline as real pixels.
 It runs in any terminal; see [which ones show pictures](#which-terminals-show-pictures).
 
+**At home on [Omarchy](https://omarchy.org):** a widget in the bar with
+your unread count and a reply panel, your theme followed live, and a key
+to open it. See [On Omarchy](#on-omarchy).
+
 ![Fizz showing a conversation with an inline photo, a link with its title, and a reply](docs/main.png)
 
 | Search conversations and message text | Every key, on `?` |
@@ -23,8 +27,10 @@ conversations.
 - Search every conversation and contact by name, and messages by their words
 - New messages arrive live, with desktop notifications
 - One-time codes are picked out of messages, ready to copy
-- Follows the current [Omarchy](https://omarchy.org) theme and re-colours
-  itself when you switch; uses your terminal's colours everywhere else
+- On [Omarchy](https://omarchy.org): a bar widget showing unread
+  conversations, where you can read and reply without opening Fizz
+- Follows the current Omarchy theme and re-colours itself when you switch;
+  uses your terminal's colours everywhere else
 
 ## Getting started
 
@@ -125,7 +131,9 @@ Fizz works best in kitty or Ghostty; see
 - Install `ffmpeg` for video stills, `wl-clipboard` to paste pictures with
   Ctrl+V, and `notify-send` (libnotify) for notifications. Fizz works
   without them and uses each one if it is there.
-- Add it to your app launcher and bind a key: see
+- On Omarchy, put Fizz in the bar with `fizz widget install`, and bind a
+  key to open it: see [On Omarchy](#on-omarchy).
+- Elsewhere, add it to your app launcher: see
   [App launcher entry](#app-launcher-entry).
 - Tapbacks, edits and the like need the server's Private API helper: see
   [Private API helper](#private-api-helper-optional).
@@ -141,6 +149,36 @@ open the assistant in that folder and say:
 [`AGENTS.md`](AGENTS.md) tells it the steps and the ground rules: ask you
 for the server details, never send a message as a test, and keep your
 conversations private.
+
+## On Omarchy
+
+Fizz was built on Omarchy, and three things are specific to it.
+
+**A widget in the bar.** One command puts Fizz in the Omarchy bar:
+
+```sh
+fizz widget install          # or: fizz widget install left | center | right
+```
+
+You get an icon with the number of unread conversations. Click it for a
+panel of recent conversations where you can read the last few messages and
+reply, without opening Fizz; right-click opens Fizz itself. Try it with
+made-up conversations first using `fizz widget install --demo`. Details
+are under [Bar widget](#bar-widget-omarchy).
+
+**Your theme, live.** Fizz takes its colours from the current Omarchy
+theme and re-colours itself within a second when you switch, in the app
+and in the widget. See [Colours](#colours).
+
+**A key to open it.** Bind a key that opens Fizz, or brings it forward if
+it is already open:
+
+```lua
+-- in ~/.config/hypr/bindings.lua
+o.bind("SUPER + SHIFT + U", "Messages (Fizz)", { tui = "fizz", focus = true })
+```
+
+See [App launcher entry](#app-launcher-entry) for the launcher icon.
 
 ## Starting up
 
