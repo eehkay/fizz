@@ -391,6 +391,7 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<Hit>> {
     found.sort_by_key(|(date, ..)| std::cmp::Reverse(*date));
 
     let mut hits: Vec<Hit> = Vec::new();
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (date, start, end) in found {
         if hits.len() >= limit {
             break;
@@ -410,7 +411,7 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<Hit>> {
         };
         let guid = unescape(guid);
         // The same message can be stored twice at a page boundary.
-        if hits.iter().any(|h| h.guid == guid) {
+        if !taken.insert(guid.clone()) {
             continue;
         }
         hits.push(Hit {
