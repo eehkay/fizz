@@ -168,7 +168,7 @@ async fn check(config: &Config) -> Result<()> {
             _ => "off",
         }
     );
-    let recent = api.recent_messages(0, 1).await?;
+    let recent = api.recent_messages(None, None, 1).await?;
     println!("Messages {}", if recent.is_empty() { "none found" } else { "ok" });
     match api.contacts().await {
         Ok(contacts) => println!("Contacts {}", contacts.len()),
@@ -352,6 +352,7 @@ async fn event_loop(
             _ = tokio::time::sleep(app.tick_rate()) => app.on_tick(),
         }
     }
+    app.remember();
     // Do not leave "typing…" showing on the other side after we have gone.
     if let Some(stop) = app.stop_typing() {
         let _ = tokio::time::timeout(Duration::from_secs(2), stop).await;

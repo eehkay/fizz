@@ -128,17 +128,28 @@ impl Api {
     /// The newest messages across every chat, newest first. The chat list is
     /// built from these: the server's own "chats by last message" ordering
     /// has proved unreliable, and this is always in true order.
-    pub async fn recent_messages(&self, offset: usize, limit: usize) -> Result<Vec<Message>> {
-        self.post(
-            "/message/query",
-            json!({
-                "limit": limit,
-                "offset": offset,
-                "with": ["chat", "chat.participants", "attachment", "handle"],
-                "sort": "DESC",
-            }),
-        )
-        .await
+    ///
+    /// Asking for everything at once makes the server work for over a
+    /// second however little is wanted; giving it a date to start from
+    /// (`after`) or to work back from (`before`) is several times quicker.
+    pub async fn recent_messages(
+        &self,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let mut body = json!({
+            "limit": limit,
+            "with": ["chat", "chat.participants", "attachment", "handle"],
+            "sort": "DESC",
+        });
+        if let Some(before) = before {
+            body["before"] = json!(before);
+        }
+        if let Some(after) = after {
+            body["after"] = json!(after);
+        }
+        self.post("/message/query", body).await
     }
 
     /// A slice of every chat the server knows, in no useful order. Used to

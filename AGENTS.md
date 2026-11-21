@@ -79,6 +79,9 @@ update banner. Do this only when the owner asks for a release.
   holds the text of their messages once they turn word search on. Do not
   read, print or copy it. `fizz index` and `fizz index count <words>`
   report sizes and counts without showing any text.
+- **So is the startup snapshot.** `~/.local/state/fizz/snapshot.json`
+  holds the chat list and recent conversations from the last run. Treat it
+  like the index: do not read, print or copy it.
 - **Do not turn off System Integrity Protection** or change BlueBubbles
   Server settings on the Mac unless the user asks; the README explains
   what that costs.
@@ -107,9 +110,13 @@ update banner. Do this only when the owner asks for a release.
     and `fizz update` for both kinds of install
   - `model.rs`: the server's data shapes
   - `demo.rs`: the made-up data
+- Startup paints from the snapshot first and refreshes behind it, so
+  anything shown at launch may be a run old until the server answers.
 - Server behaviours worth knowing before changing how data is fetched:
   the chat list is built from the newest messages (`/message/query`)
-  because the server's own "chats by last message" ordering proved wrong,
+  because the server's own "chats by last message" ordering proved wrong;
+  that query takes over a second unless it is bounded by date, so the
+  first page asks only for the last three months,
   and link-preview data is only returned by `/message/query`.
 - Anything new that sends, deletes or edits must be testable in the demo
   without touching a server.

@@ -252,6 +252,20 @@ impl Default for Codes {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Startup {
+    /// Keep the chat list and the last few conversations between runs, so
+    /// Fizz opens showing them at once instead of waiting for the server.
+    pub remember: bool,
+}
+
+impl Default for Startup {
+    fn default() -> Self {
+        Startup { remember: true }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Search {
@@ -264,6 +278,7 @@ pub struct Search {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub updates: Updates,
+    pub startup: Startup,
     pub search: Search,
     pub codes: Codes,
     pub notifications: Notifications,
@@ -336,6 +351,13 @@ pub const SETTINGS_TEMPLATE: &str = r#"# Fizz settings.
 # Install an update with: fizz update
 check = true
 every_hours = 6
+
+[startup]
+# Open showing the chat list and conversations from last time straight
+# away, then catch up with the server behind them. This keeps the last few
+# conversations you opened (about 60 messages each) on this computer. When
+# false, Fizz waits for the server before showing anything.
+remember = true
 
 [search]
 # Searching messages by their words keeps a copy of message text on this

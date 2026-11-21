@@ -142,6 +142,19 @@ open the assistant in that folder and say:
 for the server details, never send a message as a test, and keep your
 conversations private.
 
+## Starting up
+
+Fizz opens showing the chat list and conversations from last time straight
+away, with "connecting" in the bottom corner, and brings them up to date
+as the server answers (usually well under a second). If the server cannot
+be reached you still see what was there, marked offline.
+
+To do that it keeps the chat list and the last few conversations you
+opened (about 60 messages each) in `~/.local/state/fizz/snapshot.json`,
+readable only by you. Set `remember = false` under `[startup]` to turn this
+off and remove the file; Fizz then waits for the server before showing
+anything.
+
 ## Stats
 
 Press `i` (or `F2` while typing) for a live panel showing:
@@ -202,6 +215,7 @@ fizz config     # opens the settings file in your $EDITOR
 its default written out, each with a comment. It covers:
 
 - **Updates:** whether to check for new versions, and how often
+- **Startup:** whether to remember the last session so it opens instantly
 - **Search:** how many years of message text to keep for word search
 - **Codes:** whether to pick out one-time codes, and whether to copy them
   automatically

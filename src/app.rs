@@ -39,6 +39,14 @@ const PLAYING_GIFS: usize = 6;
 const SEARCH_CONVERSATIONS: usize = 8;
 const SEARCH_MESSAGES: usize = 80;
 
+/// How far back the first look for conversations goes: three months.
+const RECENT_WINDOW_MS: i64 = 90 * 24 * 3600 * 1000;
+
+/// How many conversations and how much of each are remembered between runs.
+const REMEMBERED_CHATS: usize = 80;
+const REMEMBERED_CONVERSATIONS: usize = 8;
+const REMEMBERED_MESSAGES: usize = 60;
+
 /// How many of the newest messages to scan per step when building the list.
 const SCAN_PAGE: usize = 400;
 const MESSAGE_PAGE: usize = 50;
@@ -46,7 +54,9 @@ const MESSAGE_PAGE: usize = 50;
 pub enum AppEvent {
     /// A slice of the newest messages, from which the chat list is built.
     Recent {
-        offset: usize,
+        /// Whether this was a request for older history (scrolling down
+        /// the list) rather than the first, most recent page.
+        more: bool,
         result: Result<Vec<Message>, String>,
     },
     ChatDetail(Chat),
@@ -128,6 +138,19 @@ pub enum AppEvent {
     },
 }
 
+/// What is kept between runs so the next start can show something at once.
+const SNAPSHOT_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Snapshot {
+    version: u32,
+    chats: Vec<Chat>,
+    contacts: HashMap<String, String>,
+    people: Vec<(String, String)>,
+    open: Option<String>,
+    conversations: Vec<(String, Vec<Message>)>,
+}
+
 /// Which stretch of a conversation's history a fetch brought back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -135,6 +158,9 @@ pub enum Page {
     Older,
     /// Newer than anything loaded, when the view is not at the present.
     Newer,
+    /// The newest page, fetched to bring a remembered conversation up to
+    /// date.
+    Latest,
     /// Both sides of one message, after jumping to it from search.
     /// `more_newer` says whether there is more history after this window.
     Around { more_newer: bool },
@@ -174,6 +200,25 @@ pub struct Convo {
 }
 
 impl Convo {
+    /// The newest `count` messages, with the tapbacks that belong to them,
+    /// in a form that can be saved. Messages still being sent are left out.
+    fn newest(&self, count: usize) -> Vec<Message> {
+        let start = self.messages.len().saturating_sub(count);
+        let mut kept: Vec<Message> = self.messages[start..]
+            .iter()
+            .filter(|m| !m.pending && m.failed.is_none())
+            .cloned()
+            .collect();
+        let since = kept.first().map_or(i64::MAX, |m| m.date_created);
+        kept.extend(
+            self.reaction_events
+                .iter()
+                .filter(|m| m.date_created >= since)
+                .cloned(),
+        );
+        kept
+    }
+
     fn upsert(list: &mut Vec<Message>, message: Message) -> bool {
         match list.iter_mut().find(|m| m.guid == message.guid) {
             Some(existing) => {
@@ -237,7 +282,8 @@ pub struct App {
     pub chats_loading: bool,
     chats_exhausted: bool,
     /// How far back through the message history the list has been built.
-    scanned: usize,
+    /// The date of the oldest message the list has been built back to.
+    list_oldest: Option<i64>,
     detail_requested: HashSet<String>,
     pub chats_error: Option<String>,
     contacts: HashMap<String, String>,
@@ -349,6 +395,14 @@ pub struct App {
     /// When each chat was last looked at (milliseconds), kept across runs
     /// so read chats stay read even though the server is not told.
     seen: HashMap<String, i64>,
+    /// Chats opened lately, newest first: the ones worth remembering.
+    recent_opens: Vec<String>,
+    /// Conversations shown from memory that still need the server's
+    /// current version.
+    stale: HashSet<String>,
+    /// Chats shown from memory that the server has not yet confirmed.
+    unconfirmed: HashSet<String>,
+    last_saved: Instant,
     /// Whether the server can be told a chat was read.
     helper: bool,
     /// Chats already marked read on the server this run, with the newest
@@ -386,7 +440,7 @@ impl App {
             chats: Vec::new(),
             chats_loading: false,
             chats_exhausted: false,
-            scanned: 0,
+            list_oldest: None,
             detail_requested: HashSet::new(),
             chats_error: None,
             contacts: HashMap::new(),
@@ -456,6 +510,10 @@ impl App {
             draft_files: HashMap::new(),
             unread: HashSet::new(),
             seen: HashMap::new(),
+            recent_opens: Vec::new(),
+            stale: HashSet::new(),
+            unconfirmed: HashSet::new(),
+            last_saved: Instant::now(),
             helper: false,
             marked: HashMap::new(),
             online: None,
@@ -505,6 +563,7 @@ impl App {
     }
 
     pub fn start(&mut self) {
+        self.restore();
         if crate::index::enabled() {
             self.indexing = Some(crate::index::Progress::load());
             self.start_index();
@@ -524,7 +583,7 @@ impl App {
             self.set_status(format!("Settings file ignored: {problem}"));
         }
         self.can_make_stills = images::can_make_stills();
-        self.fetch_chats(0);
+        self.fetch_chats(false);
         if let Some(api) = self.api.clone() {
             let tx = self.tx.clone();
             tokio::spawn(async move {
@@ -936,25 +995,35 @@ impl App {
             .sort_by_key(|c| std::cmp::Reverse(c.last_activity()));
     }
 
-    fn fetch_chats(&mut self, offset: usize) {
+    /// Build (or extend) the chat list from the newest messages. The first
+    /// page looks only at the last few months, which the server answers
+    /// far faster than an open-ended request; `more` continues back from
+    /// the oldest message seen so far.
+    fn fetch_chats(&mut self, more: bool) {
         let Some(api) = self.api.clone() else { return };
         if self.chats_loading {
             return;
         }
         self.chats_loading = true;
+        let now = chrono::Utc::now().timestamp_millis();
+        let (before, after) = if more {
+            (self.list_oldest.map(|oldest| oldest + 1), None)
+        } else {
+            (None, Some(now - RECENT_WINDOW_MS))
+        };
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = api
-                .recent_messages(offset, SCAN_PAGE)
+                .recent_messages(before, after, SCAN_PAGE)
                 .await
                 .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::Recent { offset, result });
+            let _ = tx.send(AppEvent::Recent { more, result });
         });
     }
 
     fn fetch_more_chats(&mut self) {
         if !self.chats_exhausted {
-            self.fetch_chats(self.scanned);
+            self.fetch_chats(true);
         }
     }
 
@@ -983,6 +1052,13 @@ impl App {
             self.gif_budget = PLAYING_GIFS;
         }
         self.mark_seen(guid);
+        self.recent_opens.retain(|g| g != guid);
+        self.recent_opens.insert(0, guid.to_string());
+        self.recent_opens.truncate(REMEMBERED_CONVERSATIONS);
+        if self.stale.remove(guid) {
+            // Shown from last time: fetch what it looks like now.
+            self.refresh_latest(guid);
+        }
         let convo = self.convos.entry(guid.to_string()).or_default();
         if convo.detached && !convo.loading {
             // Left over from an earlier jump into the past: start afresh.
@@ -1018,6 +1094,122 @@ impl App {
                 result,
             });
         });
+    }
+
+    /// Fetch a conversation's newest page to bring a remembered copy up to
+    /// date, without disturbing what is on screen in the meantime.
+    fn refresh_latest(&mut self, guid: &str) {
+        let Some(api) = self.api.clone() else { return };
+        let (chat, tx) = (guid.to_string(), self.tx.clone());
+        tokio::spawn(async move {
+            let result = api
+                .messages(&chat, None, None, MESSAGE_PAGE)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx.send(AppEvent::Messages {
+                chat,
+                page: Page::Latest,
+                result,
+            });
+        });
+    }
+
+    fn snapshot_path() -> PathBuf {
+        crate::config::state_dir().join("snapshot.json")
+    }
+
+    /// Show what was on screen last time, before the server has answered.
+    fn restore(&mut self) {
+        let path = Self::snapshot_path();
+        if !crate::config::settings().startup.remember {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        let Some(snapshot) = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
+            .filter(|snapshot| snapshot.version == SNAPSHOT_VERSION)
+        else {
+            return;
+        };
+        self.contacts = snapshot.contacts;
+        self.people = snapshot.people;
+        self.chats = snapshot.chats;
+        self.unconfirmed = self.chats.iter().map(|c| c.guid.clone()).collect();
+        for (guid, messages) in snapshot.conversations {
+            let mut convo = Convo {
+                loaded: true,
+                ..Convo::default()
+            };
+            for message in messages {
+                convo.absorb(message);
+            }
+            convo.settle();
+            self.stale.insert(guid.clone());
+            self.convos.insert(guid, convo);
+        }
+        self.sort_chats();
+        let first = snapshot
+            .open
+            .filter(|guid| self.chats.iter().any(|c| &c.guid == guid))
+            .or_else(|| self.chats.first().map(|c| c.guid.clone()));
+        if let Some(guid) = first {
+            self.cursor = Some(guid.clone());
+            self.open_chat(&guid);
+        }
+    }
+
+    /// Remember the chat list and the last few conversations for next time.
+    pub fn remember(&mut self) {
+        self.last_saved = Instant::now();
+        if self.api.is_none() || !crate::config::settings().startup.remember {
+            return;
+        }
+        let chats: Vec<Chat> = self
+            .chats
+            .iter()
+            .filter(|c| !c.is_draft())
+            .take(REMEMBERED_CHATS)
+            .cloned()
+            .collect();
+        let conversations = self
+            .recent_opens
+            .iter()
+            .filter_map(|guid| {
+                let convo = self.convos.get(guid)?;
+                // A view parked in the past is not what to reopen to.
+                (convo.loaded && !convo.detached).then(|| (guid.clone(), convo.newest(REMEMBERED_MESSAGES)))
+            })
+            .collect();
+        let snapshot = Snapshot {
+            version: SNAPSHOT_VERSION,
+            chats,
+            contacts: self.contacts.clone(),
+            people: self.people.clone(),
+            open: self.open.clone().filter(|g| !g.starts_with("new:")),
+            conversations,
+        };
+        let Ok(json) = serde_json::to_vec(&snapshot) else {
+            return;
+        };
+        let path = Self::snapshot_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("tmp");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let written = options
+            .open(&tmp)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, &json));
+        if written.is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
 
     /// When the view is away from the present: fetch the next newer page.
@@ -2341,16 +2533,48 @@ impl App {
                     }
                 }
             }
-            AppEvent::Recent { offset, result } => {
+            AppEvent::Recent { more, result } => {
                 self.chats_loading = false;
                 match result {
                     Ok(page) => {
                         self.chats_error = None;
                         self.online = Some(true);
-                        if page.len() < SCAN_PAGE {
+                        let now = chrono::Utc::now().timestamp_millis();
+                        let full = page.len() >= SCAN_PAGE;
+                        // How far back this page reaches. A short first page
+                        // covered its whole window; a short later page means
+                        // there is no more history.
+                        let reached = match (page.iter().map(|m| m.date_created).min(), more, full) {
+                            (Some(oldest), _, true) | (Some(oldest), true, false) => oldest,
+                            _ => now - RECENT_WINDOW_MS,
+                        };
+                        if more && !full {
                             self.chats_exhausted = true;
                         }
-                        self.scanned = self.scanned.max(offset + page.len());
+                        self.list_oldest = Some(self.list_oldest.map_or(reached, |o| o.min(reached)));
+                        if !more {
+                            // Chats remembered from last time that the server
+                            // should have mentioned in this page but did not
+                            // have been deleted since.
+                            let seen: HashSet<&str> = page
+                                .iter()
+                                .flat_map(|m| m.chats.iter().map(|c| c.guid.as_str()))
+                                .collect();
+                            let open = self.open.clone();
+                            let gone: Vec<String> = std::mem::take(&mut self.unconfirmed)
+                                .into_iter()
+                                .filter(|guid| {
+                                    !seen.contains(guid.as_str())
+                                        && open.as_deref() != Some(guid.as_str())
+                                        && self
+                                            .chats
+                                            .iter()
+                                            .find(|c| &c.guid == guid)
+                                            .is_some_and(|c| c.last_activity() > reached)
+                                })
+                                .collect();
+                            self.chats.retain(|c| !gone.contains(&c.guid));
+                        }
                         for message in &page {
                             self.note_chat_activity(message);
                         }
@@ -2422,6 +2646,22 @@ impl App {
                                 convo.grew_below = true;
                             }
                             Page::Around { more_newer } => convo.detached = more_newer,
+                            Page::Latest => {
+                                // If what we remembered does not reach as far
+                                // as this page, there is a gap of messages we
+                                // never saw between them: start again from
+                                // the page rather than show history with a
+                                // hole in it.
+                                let joins = convo.messages.is_empty()
+                                    || messages
+                                        .iter()
+                                        .any(|m| convo.messages.iter().any(|c| c.guid == m.guid));
+                                if !joins {
+                                    convo.messages.retain(|m| m.pending);
+                                    convo.reaction_events.clear();
+                                    convo.exhausted = messages.len() < MESSAGE_PAGE;
+                                }
+                            }
                         }
                         for message in messages {
                             convo.absorb(message);
@@ -2831,6 +3071,9 @@ impl App {
 
     pub fn on_tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
+        if self.last_saved.elapsed() > Duration::from_secs(90) {
+            self.remember();
+        }
         self.sync_typing();
         if self.stats {
             self.sample_usage();
@@ -2990,7 +3233,7 @@ impl App {
                 KeyCode::Char('D') => self.start_deleting(),
                 KeyCode::Char('r') => {
                     self.set_status("Refreshing…".into());
-                    self.fetch_chats(0);
+                    self.fetch_chats(false);
                 }
                 KeyCode::Esc => {
                     if self.filter.is_empty() {
