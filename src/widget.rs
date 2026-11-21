@@ -23,8 +23,39 @@ The Fizz widget for the Omarchy bar: an unread count, your recent
 conversations, and a reply box.
 
   fizz widget install         Put it in the bar (again after an update)
+  fizz widget install left    Choose where: left, center or right
   fizz widget install --demo  The same, showing made-up conversations
-  fizz widget remove          Take it out again";
+  fizz widget remove          Take it out again
+
+It goes on the right unless you say otherwise. Running install again with
+a place moves it there. The finer positions Omarchy has can be named with
+--section: centerBegin, centerEnd or tray.";
+
+/// The bar sections Omarchy has, as it names them.
+const SECTIONS: [&str; 6] = ["left", "centerBegin", "center", "centerEnd", "tray", "right"];
+
+/// Where the user asked for the widget to go, if they said: one of
+/// `left`, `center` or `right` as a plain word, or any section after
+/// `--section`. An unknown name is an error rather than a silent default.
+fn wanted_section(args: &[String]) -> Result<Option<&'static str>> {
+    let named = args
+        .iter()
+        .position(|a| a == "--section")
+        .map(|i| args.get(i + 1).map(String::as_str).unwrap_or(""));
+    let word = args
+        .iter()
+        .map(String::as_str)
+        .find(|a| ["left", "center", "right"].contains(a));
+    match named.or(word) {
+        None => Ok(None),
+        Some(name) => SECTIONS
+            .iter()
+            .find(|s| s.eq_ignore_ascii_case(name))
+            .copied()
+            .map(Some)
+            .with_context(|| format!("\"{name}\" is not a place in the bar; use one of: {}", SECTIONS.join(", "))),
+    }
+}
 
 /// Where the Omarchy shell looks for plugins, if Omarchy is here at all.
 fn plugins_dir() -> Result<PathBuf> {
@@ -98,7 +129,7 @@ fn refresh() -> Result<()> {
     write_files(&dir, &std::env::current_exe()?)
 }
 
-fn install(demo: bool) -> Result<()> {
+fn install(demo: bool, section: Option<&str>) -> Result<()> {
     let dir = plugins_dir()?.join(ID);
     let fizz = std::env::current_exe().context("couldn't tell where this Fizz is")?;
     if dir.is_symlink() {
@@ -115,9 +146,18 @@ fn install(demo: bool) -> Result<()> {
     if !placed {
         // The shell notices new plugins by itself, but not at once.
         let _ = Command::new("omarchy-shell").args(["shell", "rescanPlugins"]).output();
-        if !omarchy(&["bar", "put", ID]) {
+        let mut put = vec!["bar", "put", ID];
+        if let Some(section) = section {
+            put.extend(["--section", section]);
+        }
+        if !omarchy(&put) {
             println!("\nCouldn't add it to the bar. Try: omarchy plugin enable {ID}");
             return Ok(());
+        }
+    } else if let Some(section) = section {
+        // Already in the bar: being told a place means move it there.
+        if !omarchy(&["bar", "move", ID, "--section", section]) {
+            println!("\nCouldn't move it. Try: omarchy bar move {ID} --section {section}");
         }
     }
     if demo || placed {
@@ -126,7 +166,8 @@ fn install(demo: bool) -> Result<()> {
         omarchy(&["bar", "set", ID, "demo", value, "--json"]);
     }
     println!(
-        "\nThe widget is in the bar{}. Click it for your conversations; right-click opens Fizz.",
+        "\nThe widget is in the bar{}{}. Click it for your conversations; right-click opens Fizz.",
+        section.map_or(String::new(), |s| format!(" ({s})")),
         if demo { ", showing made-up conversations" } else { "" }
     );
     if demo {
@@ -164,7 +205,7 @@ fn remove() -> Result<()> {
 pub fn command(args: &[String]) -> Result<()> {
     let has = |word: &str| args.iter().any(|a| a == word);
     if has("install") {
-        install(has("--demo"))
+        install(has("--demo"), wanted_section(args)?)
     } else if has("remove") {
         remove()
     } else if has("refresh") {
@@ -178,6 +219,20 @@ pub fn command(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_where_the_widget_should_go() {
+        let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        assert_eq!(wanted_section(&args(&["widget", "install"])).unwrap(), None);
+        assert_eq!(wanted_section(&args(&["widget", "install", "left"])).unwrap(), Some("left"));
+        assert_eq!(wanted_section(&args(&["widget", "install", "--demo", "center"])).unwrap(), Some("center"));
+        assert_eq!(
+            wanted_section(&args(&["widget", "install", "--section", "centerend"])).unwrap(),
+            Some("centerEnd")
+        );
+        assert!(wanted_section(&args(&["widget", "install", "--section", "top"])).is_err());
+        assert!(wanted_section(&args(&["widget", "install", "--section"])).is_err());
+    }
 
     #[test]
     fn the_manifest_names_the_files_that_ship() {

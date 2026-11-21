@@ -467,8 +467,13 @@ conversations, and a panel with your recent conversations where you can read
 the last few messages and reply.
 
 ```sh
-fizz widget install
+fizz widget install          # on the right of the bar
+fizz widget install left     # or: left, center, right
 ```
+
+Running it again with a place moves the widget there. Omarchy's finer
+positions can be named with `--section`: `centerBegin`, `centerEnd` or
+`tray`.
 
 That writes the widget into `~/.config/omarchy/plugins/eehkay.fizz` and adds
 it to the bar. Drag it to move it, like any other bar widget. To try it with
