@@ -154,6 +154,8 @@ conversations private.
 
 Fizz was built on Omarchy, and three things are specific to it.
 
+![The Fizz widget in the Omarchy bar: an unread count beside the icon, and a panel listing recent conversations](docs/widget.png)
+
 **A widget in the bar.** One command puts Fizz in the Omarchy bar:
 
 ```sh
