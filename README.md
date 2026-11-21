@@ -202,6 +202,7 @@ fizz config    # open the settings file in your $EDITOR
 fizz update    # install the newest version (--check only looks)
 fizz storage   # what Fizz keeps on disk, against each store's limit
 fizz index     # the message-text search index ("fizz index delete" removes it)
+fizz widget    # put Fizz in the Omarchy bar ("install", or "remove")
 fizz --demo    # made-up conversations, no server needed
 fizz --help    # this list, and the environment variables
 ```
@@ -458,6 +459,52 @@ On Omarchy, bind a key to open it (or focus it if it is already open) in
 ```lua
 o.bind("SUPER + SHIFT + U", "Messages (Fizz)", { tui = "fizz", focus = true })
 ```
+
+## Bar widget (Omarchy)
+
+On Omarchy, Fizz can sit in the bar: an icon with the number of unread
+conversations, and a panel with your recent conversations where you can read
+the last few messages and reply.
+
+```sh
+fizz widget install
+```
+
+That writes the widget into `~/.config/omarchy/plugins/eehkay.fizz` and adds
+it to the bar. Drag it to move it, like any other bar widget. To try it with
+made-up conversations first, use `fizz widget install --demo`; running the
+install again without `--demo` switches it to your own messages.
+`fizz widget remove` takes it out.
+
+- Click the icon for the panel; right-click opens Fizz itself.
+- Click a conversation (or Up/Down and Enter) to open it. That marks it
+  read, as opening it in Fizz does.
+- Type and press Enter to reply. Esc goes back to the list, and again to
+  close the panel.
+- A message that did not go is marked; click it to try again.
+
+The widget only replies. Starting a conversation means choosing who it goes
+to, so that stays in Fizz, a click away. Pictures and files show as a label
+(`[Photo]`), and the panel never notifies or makes a sound: that is still
+Fizz's job while it is open.
+
+To open the panel from the keyboard, bind a key in
+`~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + ALT + U", "Messages panel", "omarchy-shell eehkay.fizz toggle")
+```
+
+The widget does not talk to your server itself. It starts `fizz bridge`,
+which is Fizz without its interface: it prints what the panel shows as lines
+of JSON and takes requests the same way (the format is at the top of
+`src/bridge.rs`), so the server password stays where it already is and
+nothing new holds your messages. One runs for the whole bar, however many
+screens it is on.
+
+`fizz update` renews the widget's files along with Fizz. The bar keeps
+running the version it first loaded, so if the panel says Fizz and the widget
+are different versions, restart the bar with `omarchy restart shell`.
 
 ## Private API helper (optional)
 

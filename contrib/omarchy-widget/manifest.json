@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "id": "eehkay.fizz",
+  "name": "Fizz",
+  "version": "1.0.0",
+  "author": "eehkay",
+  "license": "MIT",
+  "description": "iMessage in the Omarchy bar, through Fizz: an unread count, your recent conversations, and a reply box.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Fizz",
+    "description": "Unread count in the bar; click for recent conversations and to reply. Left = panel, right = open Fizz.",
+    "category": "Communication",
+    "aliases": [
+      "messages",
+      "imessage",
+      "texts"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showCount": true,
+      "demo": false
+    },
+    "schema": [
+      {
+        "key": "showCount",
+        "type": "boolean",
+        "label": "Show the unread count next to the icon",
+        "defaultValue": true
+      },
+      {
+        "key": "demo",
+        "type": "boolean",
+        "label": "Demo: show made-up conversations",
+        "description": "Talks to no server and sends nothing. For trying the widget out.",
+        "defaultValue": false
+      }
+    ]
+  }
+}

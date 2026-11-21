@@ -319,6 +319,9 @@ pub struct App {
     /// Whether the terminal window has keyboard focus, when it tells us.
     window_focused: bool,
     notify: bool,
+    /// Running without the interface, for `fizz bridge`: nothing is opened,
+    /// announced or downloaded unless it is asked for.
+    headless: bool,
     notified: HashSet<String>,
     last_sound: Option<Instant>,
     /// The most recent one-time code to arrive, and when.
@@ -467,6 +470,7 @@ impl App {
                 crate::config::settings().notifications.enabled,
                 |v| v != "0" && v != "off",
             ),
+            headless: false,
             notified: HashSet::new(),
             last_sound: None,
             last_code: None,
@@ -573,20 +577,7 @@ impl App {
             self.indexing = Some(crate::index::Progress::load());
             self.start_index();
         }
-        // Read markers live in the database. Ones kept in a file by an
-        // older version are moved across, and the file removed.
-        self.store = crate::store::open()
-            .map_err(|e| crate::config::log(&format!("database unavailable: {e:#}")))
-            .ok();
-        if let Some(conn) = &self.store {
-            if let Ok(bytes) = std::fs::read(Self::seen_path()) {
-                let old: HashMap<String, i64> = serde_json::from_slice(&bytes).unwrap_or_default();
-                if old.iter().all(|(chat, at)| crate::store::set_seen(conn, chat, *at).is_ok()) {
-                    let _ = std::fs::remove_file(Self::seen_path());
-                }
-            }
-            self.seen = crate::store::seen(conn);
-        }
+        self.open_store();
         if let Some(api) = self.api.clone() {
             let tx = self.tx.clone();
             tokio::spawn(async move {
@@ -621,6 +612,97 @@ impl App {
                 }
             });
         }
+    }
+
+    /// As [`App::start`], for `fizz bridge`: the chat list, names and read
+    /// markers, and nothing that belongs to the full interface (the saved
+    /// session, the search index, every chat on the server).
+    pub fn start_headless(&mut self) {
+        self.headless = true;
+        let Some(api) = self.api.clone() else {
+            // The demo opens its first conversation; here nothing is open
+            // until it is asked for.
+            self.open = None;
+            return;
+        };
+        self.open_store();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            if let Ok(info) = api.server_info().await {
+                let _ = tx.send(AppEvent::Info(info));
+            }
+            if let Ok(contacts) = api.contacts().await {
+                let _ = tx.send(AppEvent::Contacts(contacts));
+            }
+        });
+        self.fetch_chats(false);
+    }
+
+    /// Open the database and load the read markers from it. Markers kept
+    /// in a file by an older version are moved across, and the file
+    /// removed.
+    fn open_store(&mut self) {
+        self.store = crate::store::open()
+            .map_err(|e| crate::config::log(&format!("database unavailable: {e:#}")))
+            .ok();
+        if let Some(conn) = &self.store {
+            if let Ok(bytes) = std::fs::read(Self::seen_path()) {
+                let old: HashMap<String, i64> = serde_json::from_slice(&bytes).unwrap_or_default();
+                if old.iter().all(|(chat, at)| crate::store::set_seen(conn, chat, *at).is_ok()) {
+                    let _ = std::fs::remove_file(Self::seen_path());
+                }
+            }
+            self.seen = crate::store::seen(conn);
+        }
+    }
+
+    /// Take in read markers another running Fizz has written since ours
+    /// were loaded (the app and the bar widget's bridge share them through
+    /// the database). True when that changed anything.
+    pub fn reload_seen(&mut self) -> bool {
+        let Some(conn) = &self.store else {
+            return false;
+        };
+        let theirs = crate::store::seen(conn);
+        let mut changed = false;
+        for (guid, at) in theirs {
+            if self.seen.get(&guid).is_none_or(|ours| *ours < at) {
+                self.seen.insert(guid.clone(), at);
+                self.unread.remove(&guid);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Stop showing any conversation, so what arrives next counts as unread.
+    pub fn close_chat(&mut self) {
+        self.open = None;
+    }
+
+    /// Send text to a conversation that already exists, as if it had been
+    /// typed there. False when there is no such conversation.
+    pub fn send_to(&mut self, guid: &str, text: &str) -> bool {
+        if guid.starts_with("new:") || !self.chats.iter().any(|c| c.guid == guid) {
+            return false;
+        }
+        self.open_chat(guid);
+        self.input.set(text.to_string());
+        self.send();
+        true
+    }
+
+    /// Send one of our messages that failed again.
+    pub fn retry(&mut self, chat: &str, message: &str) {
+        if self.chats.iter().any(|c| c.guid == chat) {
+            self.open_chat(chat);
+            self.retry_failed(Some(message.to_string()));
+        }
+    }
+
+    /// Ask the server for the chat list again.
+    pub fn refresh_chats(&mut self) {
+        self.fetch_chats(false);
     }
 
     // ----- names -------------------------------------------------------
@@ -1322,6 +1404,9 @@ impl App {
     }
 
     fn request_images(&mut self) {
+        if self.headless {
+            return;
+        }
         let Some(convo) = self.open.as_ref().and_then(|g| self.convos.get(g)) else {
             return;
         };
@@ -2087,7 +2172,8 @@ impl App {
     /// hand: say so, remember it for Ctrl+Y, and copy it if asked to.
     fn note_code(&mut self, message: &Message) {
         let settings = &crate::config::settings().codes;
-        if !settings.detect
+        if self.headless
+            || !settings.detect
             || message.is_from_me
             || message.date_created < self.started_ms - 10_000
             || !self.codes_seen.insert(message.guid.clone())
@@ -2149,7 +2235,8 @@ impl App {
     fn maybe_notify(&mut self, message: &Message) {
         let sound = crate::config::settings().notifications.sound.as_str();
         let wants_sound = !matches!(sound.trim(), "" | "off");
-        if (!self.notify && !wants_sound)
+        if self.headless
+            || (!self.notify && !wants_sound)
             || self.api.is_none()
             || message.is_from_me
             || message.item_type != 0
@@ -2595,6 +2682,7 @@ impl App {
                             self.cursor = self.chats.first().map(|c| c.guid.clone());
                         }
                         if self.open.is_none()
+                            && !self.headless
                             && let Some(first) = self.cursor.clone()
                         {
                             self.open_chat(&first);

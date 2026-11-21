@@ -50,6 +50,11 @@ running on a Mac that the user controls; it has no service of its own.
    `~/.local/share/icons/hicolor/scalable/apps/`. On Omarchy, a key binding
    goes in `~/.config/hypr/bindings.lua`; the README has the line. Check
    the key is free first and back the file up.
+7. Optional bar widget, on Omarchy only: `fizz widget install` adds an icon
+   with the unread count and a panel for reading and replying. It changes
+   the user's bar, so offer it rather than doing it unasked.
+   `fizz widget install --demo` shows made-up conversations instead, and
+   `fizz widget remove` takes it out.
 
 ## Updating it for someone
 
@@ -75,9 +80,16 @@ update banner. Do this only when the owner asks for a release.
   `fizz --snapshot 120x36` to print one frame as plain text (useful,
   since you cannot drive a full-screen terminal app directly). Do not
   capture or print the user's real conversations.
+- **`fizz bridge` prints the user's messages.** It is what the bar widget
+  reads: the recent conversations and their text, as JSON on standard
+  output. Only ever run it as `fizz bridge --demo`, which uses the made-up
+  conversations and cannot send. The same goes for looking at the widget:
+  use `fizz widget install --demo`, and do not screenshot the panel while it
+  shows real conversations.
 - **The database is the user's messages.** `~/.local/share/fizz/fizz.db`
   holds the text of their messages once they turn word search on. Do not
-  read, print or copy it, and do not open it with `sqlite3` to look around. `fizz index` and `fizz index count <words>`
+  read, print or copy it, and do not open it with `sqlite3` to look
+  around. `fizz storage`, `fizz index` and `fizz index count <words>`
   report sizes and counts without showing any text.
 - **So is the startup snapshot.** `~/.local/state/fizz/snapshot.json`
   holds the chat list and recent conversations from the last run. Treat it
@@ -96,6 +108,10 @@ update banner. Do this only when the owner asks for a release.
   - `main.rs`: commands and the event loop
   - `app.rs`: all state and everything that changes it (keys, mouse,
     events from background work)
+  - `bridge.rs`: `fizz bridge`, the app's state without its interface, as
+    JSON for the bar widget; the format is at the top of the file
+  - `widget.rs`: `fizz widget`, which installs the Omarchy bar widget kept
+    in `contrib/omarchy-widget` (built into the binary)
   - `ui.rs`: drawing only
   - `api.rs`: the BlueBubbles REST calls
   - `live.rs`: live updates (socket.io) plus a catch-up poll
@@ -123,3 +139,8 @@ update banner. Do this only when the owner asks for a release.
   and link-preview data is only returned by `/message/query`.
 - Anything new that sends, deletes or edits must be testable in the demo
   without touching a server.
+- The bar widget draws only what `fizz bridge` prints. Change the format in
+  `bridge.rs` and `contrib/omarchy-widget` together, and raise `VERSION`
+  there when a field changes meaning. The Omarchy shell keeps running the
+  first version of a widget's files it loaded, so to see an edit, restart
+  the shell (`omarchy restart shell`) or install a copy under another id.

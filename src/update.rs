@@ -245,6 +245,18 @@ async fn install_release(tag: &str) -> Result<()> {
 /// `fizz update`: install the newest version, whichever way this copy
 /// arrived. With `check_only`, just say whether there is one.
 pub async fn update(check_only: bool) -> Result<()> {
+    // Where this Fizz is, asked now: once it has been replaced the system
+    // no longer gives a usable answer.
+    let fizz = std::env::current_exe().ok();
+    // The bar widget's files are part of Fizz, so they are renewed with it,
+    // by the new version.
+    let refresh_widget = move || {
+        if crate::widget::installed()
+            && let Some(fizz) = &fizz
+        {
+            let _ = std::process::Command::new(fizz).args(["widget", "refresh"]).status();
+        }
+    };
     let release = built_release();
     let built = built_commit();
     let installed = match (release.is_empty(), built.is_empty()) {
@@ -265,6 +277,7 @@ pub async fn update(check_only: bool) -> Result<()> {
 
     if !release.is_empty() {
         install_release(&latest).await?;
+        refresh_widget();
         println!("\nDone. Quit Fizz and open it again to use {latest}.");
         return Ok(());
     }
@@ -283,6 +296,7 @@ pub async fn update(check_only: bool) -> Result<()> {
     );
     println!("\nBuilding (this takes a minute)…\n");
     run("cargo", &["install", "--path", ".", "--locked"], &source)?;
+    refresh_widget();
     println!("\nDone. Quit Fizz and open it again to use the new version.");
     Ok(())
 }

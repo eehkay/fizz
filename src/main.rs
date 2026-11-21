@@ -2,6 +2,7 @@
 
 mod api;
 mod app;
+mod bridge;
 mod codes;
 mod config;
 mod demo;
@@ -18,6 +19,7 @@ mod store;
 mod theme;
 mod update;
 mod ui;
+mod widget;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -52,6 +54,7 @@ Usage:
   fizz index      Show the message-text search index (add: delete, to
                   remove it and turn it off)
   fizz sound      Play the notification sound
+  fizz widget     Put Fizz in the Omarchy bar (install, or remove)
   fizz --demo     Try the interface with made-up conversations
 
 The server address and password live in ~/.config/fizz/env (BB_URL and
@@ -144,6 +147,18 @@ async fn main() -> Result<()> {
         // Give the player a moment before this process exits.
         std::thread::sleep(Duration::from_millis(600));
         return Ok(());
+    }
+    if has("widget") {
+        return widget::command(&args);
+    }
+    if has("bridge") {
+        // For a status-bar widget: no interface, and nothing asked of whoever
+        // started it, so missing server details are an error, not a prompt.
+        let config = match has("--demo") {
+            true => None,
+            false => Some(config::load()?.context("no server details yet: run `fizz setup` first")?),
+        };
+        return bridge::run(config).await;
     }
     if has("--demo") {
         return run(None).await;
