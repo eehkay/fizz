@@ -1,8 +1,8 @@
 //! Server address and password, read from the environment or
-//! `~/.config/fizz/env`, with an interactive prompt on first run.
+//! `~/.config/fizz/env` (which `fizz setup` writes; see `setup.rs`).
 
 use anyhow::{Context, Result, bail};
-use std::io::{self, BufRead, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -59,7 +59,7 @@ fn parse(text: &str) -> (Option<String>, Option<String>) {
     (url, password)
 }
 
-fn clean_url(url: &str) -> String {
+pub fn clean_url(url: &str) -> String {
     let url = url.trim().trim_end_matches('/');
     if url.starts_with("http://") || url.starts_with("https://") {
         url.to_string()
@@ -87,34 +87,6 @@ pub fn load() -> Result<Option<Config>> {
         })),
         _ => Ok(None),
     }
-}
-
-fn prompt(label: &str) -> Result<String> {
-    print!("{label}");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim().to_string())
-}
-
-/// Ask for the server details on the terminal and save them.
-pub fn interactive_setup() -> Result<Config> {
-    println!("Fizz needs to know where your BlueBubbles server is.\n");
-    println!("  The address is whatever reaches the Mac running BlueBubbles Server,");
-    println!("  for example http://my-mac:1234 or your proxy URL.");
-    println!("  The password is the one set in BlueBubbles Server > Settings.\n");
-    let url = prompt("Server address: ")?;
-    let password = prompt("Server password: ")?;
-    if url.is_empty() || password.is_empty() {
-        bail!("both the address and the password are required");
-    }
-    let config = Config {
-        url: clean_url(&url),
-        password,
-    };
-    save(&config)?;
-    println!("\nSaved to {}\n", config_path().display());
-    Ok(config)
 }
 
 pub fn save(config: &Config) -> Result<()> {

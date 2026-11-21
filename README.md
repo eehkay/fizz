@@ -97,8 +97,20 @@ and `q` to quit.
 fizz setup
 ```
 
-It asks for the address and password from step 1, saves them, and tests
-the connection straight away. You are looking for:
+It asks for the address and password from step 1. The password shows as
+dots while you type it:
+
+```
+Server address:  http://my-mac:1234
+Server password: ••••••••••
+
+Checking http://my-mac:1234 … connected (BlueBubbles 1.9.9 on macOS 15.5).
+Saved to ~/.config/fizz/env, readable only by you.
+```
+
+Nothing is saved until the server has accepted them. If it hasn't, Fizz
+says whether the address or the password was the problem and asks again.
+After that it runs a fuller test, where you are looking for:
 
 ```
 Messages ok
@@ -106,9 +118,9 @@ Contacts 240
 Live     ok
 ```
 
-If it says it can't reach the server, the address is wrong or not reachable
-from this computer; run `fizz setup` again. The contacts number is however
-many are in the Mac's address book. (To write the file by hand
+The contacts number is however many are in the Mac's address book. Run
+`fizz setup` again any time to change either value; Enter keeps the one
+already saved. (To write the file by hand
 instead, see [`env.example`](env.example).)
 
 ### 5. Open it

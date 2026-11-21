@@ -14,6 +14,7 @@ mod input;
 mod live;
 mod metrics;
 mod model;
+mod setup;
 mod storage;
 mod store;
 mod theme;
@@ -164,17 +165,18 @@ async fn main() -> Result<()> {
         return run(None).await;
     }
     if has("setup") {
-        let config = config::interactive_setup()?;
-        return check(&config).await;
+        let done = setup::run().await?;
+        if done.verified {
+            check(&done.config).await?;
+            setup::next_steps();
+        }
+        return Ok(());
     }
 
     let config = match config::load()? {
         Some(config) => config,
-        None => {
-            let config = config::interactive_setup()?;
-            check(&config).await?;
-            config
-        }
+        // First run: ask, then carry on into the app.
+        None => setup::run().await?.config,
     };
     if has("check") {
         return check(&config).await;

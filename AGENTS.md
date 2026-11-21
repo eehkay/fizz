@@ -118,6 +118,8 @@ update banner. Do this only when the owner asks for a release.
   - `images.rs`, `files.rs`: picture thumbnails and video stills;
     opening, saving, attaching, clipboard, notifications
   - `config.rs`: server details and the settings file
+  - `setup.rs`: `fizz setup`, which asks for the server details (password
+    shown as dots), tests them and saves them
   - `theme.rs`: colours, including following the Omarchy theme
   - `codes.rs`: spotting one-time codes in message text
   - `store.rs`: the SQLite database (tables, search, read markers)
