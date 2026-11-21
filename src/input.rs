@@ -136,6 +136,93 @@ impl Input {
         self.cursor = start;
     }
 
+    /// Where each line on screen starts and ends in the text, for a box
+    /// `width` cells wide. A line ends at a line break or where it wraps.
+    fn rows(&self, width: u16) -> Vec<(usize, usize)> {
+        let width = width.max(1) as usize;
+        let mut rows = Vec::new();
+        let (mut start, mut col) = (0usize, 0usize);
+        for (i, g) in self.text.grapheme_indices(true) {
+            if g == "\n" || g == "\r\n" {
+                rows.push((start, i));
+                start = i + g.len();
+                col = 0;
+                continue;
+            }
+            let w = g.width();
+            if col + w > width {
+                rows.push((start, i));
+                start = i;
+                col = 0;
+            }
+            col += w;
+        }
+        rows.push((start, self.text.len()));
+        rows
+    }
+
+    /// Move the cursor one line up or down, keeping its column where the
+    /// line is long enough. Off the first or last line it goes to the very
+    /// start or end, as text boxes usually do.
+    fn vertical(&mut self, width: u16, down: bool) {
+        let rows = self.rows(width);
+        // The line the cursor is on: the last one starting at or before it.
+        let current = rows
+            .iter()
+            .rposition(|(start, _)| *start <= self.cursor)
+            .unwrap_or(0);
+        let column = self.text[rows[current].0..self.cursor].width();
+        let target = if down {
+            current + 1
+        } else {
+            match current.checked_sub(1) {
+                Some(above) => above,
+                None => return self.cursor = 0,
+            }
+        };
+        let Some(&(start, end)) = rows.get(target) else {
+            return self.cursor = self.text.len();
+        };
+        let mut at = start;
+        let mut col = 0;
+        for g in self.text[start..end].graphemes(true) {
+            let w = g.width();
+            if col + w > column {
+                break;
+            }
+            col += w;
+            at += g.len();
+        }
+        self.cursor = at;
+    }
+
+    pub fn up(&mut self, width: u16) {
+        self.vertical(width, false);
+    }
+
+    pub fn down(&mut self, width: u16) {
+        self.vertical(width, true);
+    }
+
+    /// To the start of the word before the cursor.
+    pub fn word_left(&mut self) {
+        let before = &self.text[..self.cursor];
+        let trimmed = before.trim_end_matches(|c: char| c.is_whitespace());
+        self.cursor = trimmed
+            .rfind(|c: char| c.is_whitespace())
+            .map_or(0, |i| i + trimmed[i..].chars().next().map_or(1, char::len_utf8));
+    }
+
+    /// To the end of the word after the cursor.
+    pub fn word_right(&mut self) {
+        let after = &self.text[self.cursor..];
+        let skipped = after.len() - after.trim_start_matches(|c: char| c.is_whitespace()).len();
+        let word = after[skipped..]
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(after.len() - skipped);
+        self.cursor += skipped + word;
+    }
+
     /// Lay the text out for a box `width` cells wide. Returns the visual
     /// lines and the cursor's (column, row) within them.
     pub fn layout(&self, width: u16) -> (Vec<String>, (u16, u16)) {
@@ -216,6 +303,47 @@ mod tests {
         input.left();
         input.backspace();
         assert_eq!(input.text(), "ab");
+    }
+
+    #[test]
+    fn moves_between_lines() {
+        let mut input = Input::default();
+        // Three lines on screen at width 10: a wrap, then a real line break.
+        input.insert_str("0123456789abcde\nxy");
+        assert_eq!(input.rows(10), vec![(0, 10), (10, 15), (16, 18)]);
+        // From the end ("xy|"), up lands at column 2 of "abcde".
+        input.up(10);
+        assert_eq!(input.cursor, 12);
+        input.up(10);
+        assert_eq!(input.cursor, 2);
+        // Up from the first line goes to the very start.
+        input.up(10);
+        assert_eq!(input.cursor, 0);
+        input.down(10);
+        assert_eq!(input.cursor, 10);
+        input.down(10);
+        assert_eq!(input.cursor, 16);
+        // Down from the last line goes to the very end.
+        input.down(10);
+        assert_eq!(input.cursor, 18);
+        // A shorter line clamps the column.
+        input.set("long first line\nab\nlong third line".into());
+        input.up(40);
+        assert_eq!(&input.text[..input.cursor], "long first line\nab");
+    }
+
+    #[test]
+    fn moves_by_word() {
+        let mut input = Input::default();
+        input.insert_str("see you  tomorrow");
+        input.word_left();
+        assert_eq!(&input.text[input.cursor..], "tomorrow");
+        input.word_left();
+        assert_eq!(&input.text[input.cursor..], "you  tomorrow");
+        input.word_right();
+        assert_eq!(&input.text[..input.cursor], "see you");
+        input.word_right();
+        assert_eq!(input.cursor, input.text.len());
     }
 
     #[test]

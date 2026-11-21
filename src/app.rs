@@ -359,6 +359,8 @@ pub struct App {
     pub list_rect: Rect,
     pub convo_rect: Rect,
     pub view_rows: usize,
+    /// How wide the message box's text area is, for moving between lines.
+    pub input_width: u16,
     pub wants_older: bool,
     pub wants_newer: bool,
     /// The message to highlight once a jump's history has arrived.
@@ -457,6 +459,7 @@ impl App {
             list_rect: Rect::default(),
             convo_rect: Rect::default(),
             view_rows: 20,
+            input_width: 60,
             wants_older: false,
             wants_newer: false,
             jump_target: None,
@@ -2989,8 +2992,18 @@ impl App {
                     KeyCode::Enter if alt_or_shift => self.input.insert('\n'),
                     KeyCode::Char('j') if ctrl => self.input.insert('\n'),
                     KeyCode::Enter => self.send(),
-                    KeyCode::Up => self.scroll_by(2),
-                    KeyCode::Down => self.scroll_by(-2),
+                    // With nothing typed the arrows scroll the conversation;
+                    // otherwise they move through what is being written.
+                    KeyCode::Up if self.input.is_empty() => self.scroll_by(2),
+                    KeyCode::Down if self.input.is_empty() => self.scroll_by(-2),
+                    KeyCode::Up => self.input.up(self.input_width),
+                    KeyCode::Down => self.input.down(self.input_width),
+                    KeyCode::Left if ctrl || key.modifiers.contains(KeyModifiers::ALT) => {
+                        self.input.word_left()
+                    }
+                    KeyCode::Right if ctrl || key.modifiers.contains(KeyModifiers::ALT) => {
+                        self.input.word_right()
+                    }
                     KeyCode::Backspace if ctrl || key.modifiers.contains(KeyModifiers::ALT) => {
                         self.input.delete_word()
                     }

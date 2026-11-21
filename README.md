@@ -246,6 +246,7 @@ The essentials:
 |              | `q`                         | Quit                         |
 | Writing      | `Enter`                     | Send                         |
 |              | `Shift+Enter` or `Ctrl+J`   | New line                     |
+|              | `←` `→` `↑` `↓`             | Move through what you are typing (`Ctrl+←` `→` by word); with the box empty, `↑` `↓` scroll the conversation |
 |              | `:name`                     | Emoji: `:thu`, then `↑` `↓` and `Tab`; or finish it as `:fire:` |
 |              | drop a file on the window   | Attach it                    |
 |              | `Ctrl+V`                    | Attach a picture from the clipboard |

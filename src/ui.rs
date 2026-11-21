@@ -900,7 +900,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Backspace", "On an empty box: remove the last attached file"),
             ("Ctrl+W  Ctrl+U", "Delete a word, or everything typed"),
             ("Ctrl+R", "Try again with a message that failed to send"),
-            ("PgUp PgDn  ↑ ↓", "Scroll; older messages load at the top"),
+            ("← → ↑ ↓", "Move through what you are typing (Ctrl+← → by word)"),
+            ("PgUp PgDn", "Scroll the conversation; ↑ ↓ too when the box is empty"),
             ("Tab", "Select messages, pictures and files"),
             ("Esc", "Back to the chat list"),
         ],
@@ -1288,6 +1289,7 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Compose box first: its height decides how much timeline there is.
     let box_width = area.width.saturating_sub(4);
+    app.input_width = box_width;
     let (input_lines, (cx, cy)) = app.input.layout(box_width);
     let input_rows = (input_lines.len() as u16).clamp(1, MAX_INPUT_ROWS);
     let chips = attachment_chips(app, usize::from(box_width));
