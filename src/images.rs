@@ -88,19 +88,39 @@ pub enum Loaded {
 const MAX_FRAMES: usize = 40;
 /// GIFs larger than this are shown as a still, to keep memory in check.
 const MAX_GIF_BYTES: usize = 12 * 1024 * 1024;
+/// The most memory decoding a GIF may take. A GIF states its own canvas
+/// size, and every frame is drawn at that size however little the file
+/// holds, so a file of a few hundred bytes can ask for gigabytes. Anyone
+/// can send one. This allows a canvas of roughly 3000 by 3000, far beyond
+/// any real GIF; bigger ones are refused and shown as a still or not at all.
+const MAX_GIF_MEMORY: u64 = 128 * 1024 * 1024;
+/// The most memory decoding any one picture may take, for the same
+/// reason: a picture's stated size, not the size of its file, is what
+/// decides how much is asked for. Room for about 85 megapixels, which is
+/// more than phones take; anything bigger is not drawn (it can still be
+/// opened or saved).
+const MAX_PICTURE_MEMORY: u64 = 256 * 1024 * 1024;
+/// The most frames read from one GIF. Past this it simply plays shorter.
+const MAX_GIF_FRAMES_READ: usize = 1500;
 
 /// Decode a GIF into frames scaled to fit the box. `Ok(None)` if it turns
 /// out to have a single frame.
 pub fn decode_gif(bytes: &[u8], box_px: (u32, u32)) -> Result<Option<Vec<(DynamicImage, Duration)>>> {
     use image::AnimationDecoder;
-    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))?;
-    let frames = decoder.into_frames().collect_frames()?;
-    if frames.len() < 2 {
-        return Ok(None);
-    }
-    let step = frames.len().div_ceil(MAX_FRAMES);
+    let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes))?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_GIF_MEMORY);
+    decoder.set_limits(limits)?;
+    // Frames are taken one at a time and shrunk as they come, so only the
+    // small copies are ever held. How many there will be is not known
+    // until the end, so start by keeping every frame, and each time there
+    // are too many, drop every other one and keep half as often from then.
+    let mut step = 1;
+    let mut read = 0;
     let mut kept: Vec<(DynamicImage, Duration)> = Vec::new();
-    for (i, frame) in frames.into_iter().enumerate() {
+    for (i, frame) in decoder.into_frames().take(MAX_GIF_FRAMES_READ).enumerate() {
+        let frame = frame?;
+        read += 1;
         let (numer, denom) = frame.delay().numer_denom_ms();
         let mut delay = Duration::from_millis(u64::from(numer) / u64::from(denom.max(1)));
         // GIFs that ask for (nearly) no delay are played at ten frames a
@@ -111,10 +131,25 @@ pub fn decode_gif(bytes: &[u8], box_px: (u32, u32)) -> Result<Option<Vec<(Dynami
         if i % step == 0 {
             let picture = DynamicImage::ImageRgba8(frame.into_buffer());
             kept.push((shrink(picture, box_px.0, box_px.1), delay));
+            if kept.len() > MAX_FRAMES {
+                let mut thinned: Vec<(DynamicImage, Duration)> = Vec::with_capacity(kept.len() / 2 + 1);
+                for (n, (picture, delay)) in kept.drain(..).enumerate() {
+                    if n % 2 == 0 {
+                        thinned.push((picture, delay));
+                    } else if let Some((_, shown)) = thinned.last_mut() {
+                        *shown += delay;
+                    }
+                }
+                kept = thinned;
+                step *= 2;
+            }
         } else if let Some((_, shown)) = kept.last_mut() {
             // A skipped frame's time goes to the one shown in its place.
             *shown += delay;
         }
+    }
+    if read < 2 {
+        return Ok(None);
     }
     Ok(Some(kept))
 }
@@ -137,6 +172,10 @@ async fn load_gif(
         }
         Err(_) => {
             let bytes = api.attachment(&attachment.guid).await?;
+            if bytes.len() > MAX_GIF_BYTES {
+                // Bigger than the server said it was: a still will do.
+                return Ok(None);
+            }
             if let Some(dir) = path.parent() {
                 let _ = tokio::fs::create_dir_all(dir).await;
             }
@@ -155,6 +194,13 @@ fn cache_path(guid: &str) -> PathBuf {
 pub fn decode(bytes: &[u8]) -> Result<DynamicImage> {
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
     let mut decoder = reader.into_decoder()?;
+    // Taking the decoder apart from the reader (which is what gives the
+    // orientation) skips the reader's own check that the finished picture
+    // fits in memory, so make it here, before anything is asked for.
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_PICTURE_MEMORY);
+    limits.reserve(decoder.total_bytes())?;
+    decoder.set_limits(limits)?;
     let orientation = decoder.orientation().ok();
     let mut img = DynamicImage::from_decoder(decoder)?;
     if let Some(orientation) = orientation {
@@ -174,6 +220,11 @@ pub fn shrink(img: DynamicImage, max_w: u32, max_h: u32) -> DynamicImage {
 fn write_cache(guid: &str, img: &DynamicImage) -> Result<()> {
     let path = cache_path(guid);
     let dir = path.parent().context("cache path has no parent")?;
+    write_cache_in(dir, guid, img)
+}
+
+fn write_cache_in(dir: &std::path::Path, guid: &str, img: &DynamicImage) -> Result<()> {
+    let path = dir.join(encode(guid));
     std::fs::create_dir_all(dir)?;
     let mut bytes = Vec::new();
     // PNG is many times larger, so it is used only for pictures that
@@ -186,8 +237,10 @@ fn write_cache(guid: &str, img: &DynamicImage) -> Result<()> {
         let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, CACHE_QUALITY);
         img.to_rgb8().write_with_encoder(encoder)?;
     }
-    // Write then rename so a half-written file is never read back.
-    let tmp = dir.join(format!(".{}.tmp", std::process::id()));
+    // Write then rename so a half-written file is never read back. The
+    // name in between is this picture's own: several are cached at once,
+    // and sharing one let a picture land under another's name.
+    let tmp = dir.join(format!(".{}.{}.tmp", encode(guid), std::process::id()));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())
@@ -322,6 +375,71 @@ mod tests {
         assert_eq!(frames.len(), 5);
         assert!(frames.iter().all(|(_, delay)| *delay == Duration::from_millis(80)));
         assert_eq!((frames[0].0.width(), frames[0].0.height()), (8, 6));
+    }
+
+    /// A GIF whose canvas is `w` by `h` but whose frames are one pixel
+    /// each, which is all it takes to ask for `w * h * 4` bytes a frame.
+    fn sparse_gif(w: u16, h: u16, frames: usize) -> Vec<u8> {
+        let mut bytes = b"GIF89a".to_vec();
+        bytes.extend_from_slice(&w.to_le_bytes());
+        bytes.extend_from_slice(&h.to_le_bytes());
+        bytes.extend_from_slice(&[0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+        for _ in 0..frames {
+            bytes.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00, 0x05, 0x00, 0x00, 0x00]);
+            bytes.extend_from_slice(&[0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0x00]);
+            bytes.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
+        }
+        bytes.push(0x3B);
+        bytes
+    }
+
+    #[test]
+    fn a_gif_cannot_ask_for_more_memory_than_allowed() {
+        // 89 bytes that want 3.6 GB a frame: refused, not attempted.
+        let huge = sparse_gif(30_000, 30_000, 3);
+        assert!(huge.len() < 100);
+        assert!(decode_gif(&huge, (100, 100)).is_err());
+        // The largest canvas a GIF can state.
+        assert!(decode_gif(&sparse_gif(u16::MAX, u16::MAX, 2), (100, 100)).is_err());
+        // Nor may it be drawn as a still, which is what is tried next.
+        assert!(decode(&huge).is_err());
+        assert!(decode(&sparse_gif(u16::MAX, u16::MAX, 1)).is_err());
+        assert!(decode(&sparse_gif(64, 64, 1)).is_ok());
+        // An ordinary size with a great many frames plays, thinned, and
+        // only so much of it is read.
+        let long = sparse_gif(64, 64, MAX_GIF_FRAMES_READ + 500);
+        let frames = decode_gif(&long, (100, 100)).unwrap().unwrap();
+        assert!(frames.len() <= MAX_FRAMES && frames.len() > MAX_FRAMES / 2);
+        let total: Duration = frames.iter().map(|(_, delay)| *delay).sum();
+        assert_eq!(total, Duration::from_millis(50 * MAX_GIF_FRAMES_READ as u64));
+    }
+
+    #[test]
+    fn pictures_cached_at_once_each_keep_their_own() {
+        use image::RgbImage;
+        let dir = std::env::temp_dir().join(format!("fizz-thumbs-test-{}", std::process::id()));
+        let shade = |n: usize| (n * 9 % 250) as u8;
+        let workers: Vec<_> = (0..4usize)
+            .map(|worker| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    for n in (worker..200).step_by(4) {
+                        let picture = RgbImage::from_pixel(16, 16, image::Rgb([shade(n); 3]));
+                        write_cache_in(&dir, &format!("picture-{n}"), &DynamicImage::ImageRgb8(picture)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        for n in 0..200 {
+            let bytes = std::fs::read(dir.join(format!("picture-{n}"))).unwrap();
+            let pixel = decode(&bytes).unwrap().to_rgb8().get_pixel(8, 8).0[0];
+            assert!(pixel.abs_diff(shade(n)) <= 3, "picture {n} holds another picture");
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 200, "nothing left behind");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

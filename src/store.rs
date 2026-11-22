@@ -372,15 +372,64 @@ pub struct Hit {
     pub text: String,
 }
 
+/// The words someone typed, as the index sees words: runs of letters and
+/// digits, in lower case.
+fn words(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
 /// What someone typed, as a full-text query: every word must appear, and
 /// each matches from its start, so "tomor" finds "tomorrow".
 fn match_expression(query: &str) -> Option<String> {
-    let words: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(|w| format!("\"{}\"*", w.to_lowercase()))
-        .collect();
+    let words: Vec<String> = words(query).iter().map(|w| format!("\"{w}\"*")).collect();
     (!words.is_empty()).then(|| words.join(" "))
+}
+
+/// Whether the index turned a query down because one typed word is
+/// several words to it. That happens in writing where marks sit inside
+/// words (Hindi, Thai, Arabic with its vowels written): the index breaks
+/// a word at each mark, and it keeps no record of word order, so it
+/// cannot look for the pieces side by side.
+fn split_a_word(error: &rusqlite::Error) -> bool {
+    error.to_string().contains("phrase queries are not supported")
+}
+
+/// The same search done the slow way, for the queries the index turns
+/// down (see [`split_a_word`]): read every message and keep those whose
+/// text contains each word, anywhere in it. `select` and `rest` are the
+/// SQL either side of the conditions; `last` is one more value for `rest`.
+fn scan<T>(
+    conn: &Connection,
+    select: &str,
+    rest: &str,
+    query: &str,
+    last: Option<i64>,
+    row: impl FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+) -> rusqlite::Result<Vec<T>> {
+    use rusqlite::types::Value;
+    // Words hold only letters and digits, so nothing in one can be taken
+    // for a wildcard.
+    let mut values: Vec<Value> = words(query).into_iter().map(|w| Value::Text(format!("%{w}%"))).collect();
+    let conditions: Vec<String> = (1..=values.len()).map(|n| format!("m.text LIKE ?{n}")).collect();
+    values.extend(last.map(Value::Integer));
+    let sql = format!("{select} WHERE {} {rest}", conditions.join(" AND "));
+    let mut statement = conn.prepare(&sql)?;
+    statement.query_map(rusqlite::params_from_iter(values), row)?.collect()
+}
+
+fn hit(row: &rusqlite::Row) -> rusqlite::Result<Hit> {
+    Ok(Hit {
+        chat: row.get(0)?,
+        guid: unpack(row.get_ref(1)?),
+        date: row.get(2)?,
+        from_me: row.get(3)?,
+        sender: row.get(4)?,
+        text: row.get(5)?,
+    })
 }
 
 /// Messages containing every word of `query`, newest first.
@@ -388,28 +437,30 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Hit>> 
     let Some(expression) = match_expression(query) else {
         return Ok(Vec::new());
     };
-    let mut statement = conn.prepare_cached(
-        "SELECT c.guid, m.guid, m.date, m.from_me, m.sender, m.text
-         FROM messages_fts
-         JOIN messages m ON m.id = messages_fts.rowid
-         JOIN chats c ON c.id = m.chat
-         WHERE messages_fts MATCH ?1
-         ORDER BY m.date DESC
-         LIMIT ?2",
-    )?;
-    let hits = statement
-        .query_map(params![expression, limit as i64], |row| {
-            Ok(Hit {
-                chat: row.get(0)?,
-                guid: unpack(row.get_ref(1)?),
-                date: row.get(2)?,
-                from_me: row.get(3)?,
-                sender: row.get(4)?,
-                text: row.get(5)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(hits)
+    let indexed = || -> rusqlite::Result<Vec<Hit>> {
+        let mut statement = conn.prepare_cached(
+            "SELECT c.guid, m.guid, m.date, m.from_me, m.sender, m.text
+             FROM messages_fts
+             JOIN messages m ON m.id = messages_fts.rowid
+             JOIN chats c ON c.id = m.chat
+             WHERE messages_fts MATCH ?1
+             ORDER BY m.date DESC
+             LIMIT ?2",
+        )?;
+        statement.query_map(params![expression, limit as i64], hit)?.collect()
+    };
+    match indexed() {
+        Err(e) if split_a_word(&e) => Ok(scan(
+            conn,
+            "SELECT c.guid, m.guid, m.date, m.from_me, m.sender, m.text
+             FROM messages m JOIN chats c ON c.id = m.chat",
+            &format!("ORDER BY m.date DESC LIMIT ?{}", words(query).len() + 1),
+            query,
+            Some(limit as i64),
+            hit,
+        )?),
+        found => Ok(found?),
+    }
 }
 
 /// One conversation's share of a search: how many of its messages match,
@@ -422,6 +473,15 @@ pub struct Mention {
     pub guid: String,
 }
 
+fn mention(row: &rusqlite::Row) -> rusqlite::Result<Mention> {
+    Ok(Mention {
+        chat: row.get(0)?,
+        count: row.get::<_, i64>(1)? as u64,
+        date: row.get(2)?,
+        guid: unpack(row.get_ref(3)?),
+    })
+}
+
 /// Every conversation with messages containing the words of `query`, the
 /// one with the most first.
 pub fn mentions(conn: &Connection, query: &str) -> Result<Vec<Mention>> {
@@ -430,26 +490,30 @@ pub fn mentions(conn: &Connection, query: &str) -> Result<Vec<Mention>> {
     };
     // With a single max() in the query, SQLite takes the other plain
     // columns (here the message's id) from the row that holds the maximum.
-    let mut statement = conn.prepare_cached(
-        "SELECT c.guid, count(*), max(m.date), m.guid
-         FROM messages_fts
-         JOIN messages m ON m.id = messages_fts.rowid
-         JOIN chats c ON c.id = m.chat
-         WHERE messages_fts MATCH ?1
-         GROUP BY m.chat
-         ORDER BY count(*) DESC, max(m.date) DESC",
-    )?;
-    let found = statement
-        .query_map([expression], |row| {
-            Ok(Mention {
-                chat: row.get(0)?,
-                count: row.get::<_, i64>(1)? as u64,
-                date: row.get(2)?,
-                guid: unpack(row.get_ref(3)?),
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(found)
+    const GROUPED: &str = "GROUP BY m.chat ORDER BY count(*) DESC, max(m.date) DESC";
+    let indexed = || -> rusqlite::Result<Vec<Mention>> {
+        let mut statement = conn.prepare_cached(&format!(
+            "SELECT c.guid, count(*), max(m.date), m.guid
+             FROM messages_fts
+             JOIN messages m ON m.id = messages_fts.rowid
+             JOIN chats c ON c.id = m.chat
+             WHERE messages_fts MATCH ?1
+             {GROUPED}"
+        ))?;
+        statement.query_map([&expression], mention)?.collect()
+    };
+    match indexed() {
+        Err(e) if split_a_word(&e) => Ok(scan(
+            conn,
+            "SELECT c.guid, count(*), max(m.date), m.guid
+             FROM messages m JOIN chats c ON c.id = m.chat",
+            GROUPED,
+            query,
+            None,
+            mention,
+        )?),
+        found => Ok(found?),
+    }
 }
 
 /// How many messages contain every word of `query`.
@@ -457,11 +521,21 @@ pub fn count_matching(conn: &Connection, query: &str) -> Result<u64> {
     let Some(expression) = match_expression(query) else {
         return Ok(0);
     };
-    Ok(conn.query_row(
+    let indexed = conn.query_row(
         "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?1",
         [expression],
         |row| row.get::<_, i64>(0),
-    )? as u64)
+    );
+    let count = match indexed {
+        Err(e) if split_a_word(&e) => {
+            scan(conn, "SELECT count(*) FROM messages m", "", query, None, |row| row.get::<_, i64>(0))?
+                .first()
+                .copied()
+                .unwrap_or(0)
+        }
+        counted => counted?,
+    };
+    Ok(count as u64)
 }
 
 /// Bytes the database takes on disk, including its write-ahead file.
@@ -642,6 +716,41 @@ mod tests {
         assert_eq!(search(&conn, "cafe", 10).unwrap().len(), 1);
         assert!(search(&conn, "?!", 10).unwrap().is_empty());
         assert_eq!(count_matching(&conn, "tomorrow").unwrap(), 2);
+    }
+
+    #[test]
+    fn finds_words_the_index_breaks_apart() {
+        // Marks inside these words split them in the index, which then
+        // refuses to look for the pieces together. They must still be found.
+        let mut conn = memory();
+        put(
+            &mut conn,
+            &[
+                row("h", "chat1", 10, "नमस्ते दोस्त"),
+                row("t", "chat1", 20, "สวัสดี ครับ"),
+                row("a", "chat2", 30, "مَرْحَبًا يا صديقي"),
+                row("e", "chat2", 40, "hello दोस्त, 100% sure"),
+                row("x", "chat3", 50, "nothing like them"),
+            ],
+        )
+        .unwrap();
+        for (query, guids) in [
+            ("दोस्त", vec!["e", "h"]),
+            ("สวัสดี", vec!["t"]),
+            ("ครับ", vec!["t"]),
+            ("مَرْحَبًا", vec!["a"]),
+            // Mixed with a word the index handles, and in any case.
+            ("HELLO दोस्त", vec!["e"]),
+            ("दोस्त nowhere", vec![]),
+        ] {
+            let found = search(&conn, query, 10).unwrap();
+            assert_eq!(found.iter().map(|h| h.guid.as_str()).collect::<Vec<_>>(), guids, "{query}");
+            assert_eq!(count_matching(&conn, query).unwrap(), guids.len() as u64, "{query}");
+        }
+        assert_eq!(search(&conn, "दोस्त", 1).unwrap().len(), 1, "the limit still applies");
+        let by_chat = mentions(&conn, "दोस्त").unwrap();
+        assert_eq!(by_chat.len(), 2);
+        assert_eq!((by_chat[0].chat.as_str(), by_chat[0].guid.as_str()), ("chat2", "e"));
     }
 
     #[test]

@@ -16,6 +16,10 @@ const MB: u64 = 1024 * 1024;
 const PICTURE_AGE: Duration = Duration::from_secs(90 * 24 * 3600);
 /// The log is for recent trouble, not history.
 const LOG_LIMIT: u64 = 256 * 1024;
+/// Something written or read this recently is taken to be in use (still
+/// downloading, or just handed to another app) and is not removed to make
+/// room, however far over the limit it puts the cache.
+const IN_USE: Duration = Duration::from_secs(10 * 60);
 
 /// One thing in a cache: a file, or a folder holding one download.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,7 +65,8 @@ pub fn entries(folders: &[PathBuf]) -> Vec<Entry> {
 /// Which entries to remove: anything unused for longer than `max_age`,
 /// then, if what is left is still over `cap`, the least recently used
 /// until it is comfortably under (so the next few additions do not tip it
-/// straight back over).
+/// straight back over). Whatever is in use stays: a download bigger than
+/// the whole limit would otherwise be deleted while it was arriving.
 pub fn to_remove(
     mut entries: Vec<Entry>,
     now: SystemTime,
@@ -84,6 +89,10 @@ pub fn to_remove(
             entries.sort_by_key(|e| e.used);
             for entry in entries {
                 if total <= target {
+                    break;
+                }
+                // Sorted oldest first, so everything from here on is in use.
+                if now.duration_since(entry.used).is_ok_and(|idle| idle < IN_USE) {
                     break;
                 }
                 total -= entry.bytes;
@@ -145,12 +154,22 @@ fn trim_log() {
     if meta.len() <= LOG_LIMIT {
         return;
     }
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        let keep_from = text.len().saturating_sub((LOG_LIMIT / 4) as usize);
-        // Start at a line boundary so no line is left cut in half.
-        let start = text[keep_from..].find('\n').map_or(text.len(), |i| keep_from + i + 1);
-        let _ = std::fs::write(&path, &text[start..]);
+    if let Ok(log) = std::fs::read(&path) {
+        let _ = std::fs::write(&path, log_tail(&log, (LOG_LIMIT / 4) as usize));
     }
+}
+
+/// The last `keep` bytes or so of a log, starting at the beginning of a
+/// line. Worked out in bytes: a log holds the system's own error messages
+/// and paths, which need not be plain letters, and text may not be cut in
+/// the middle of a character.
+fn log_tail(log: &[u8], keep: usize) -> &[u8] {
+    let keep_from = log.len().saturating_sub(keep);
+    let start = log[keep_from..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(log.len(), |i| keep_from + i + 1);
+    &log[start..]
 }
 
 /// Mark something in a cache as just used, so it is the last to be trimmed.
@@ -258,6 +277,36 @@ mod tests {
         assert!(to_remove(all.clone(), now, None, Some(200 * MB)).is_empty());
         // No limit at all, nothing goes.
         assert!(to_remove(all, now, None, None).is_empty());
+    }
+
+    #[test]
+    fn what_is_in_use_is_not_removed_to_make_room() {
+        let now = SystemTime::now();
+        let minutes = |m: u64| now - Duration::from_secs(m * 60);
+        let all = vec![
+            Entry { path: "arriving".into(), bytes: 400 * MB, used: now },
+            Entry { path: "just opened".into(), bytes: 50 * MB, used: minutes(3) },
+            Entry { path: "idle".into(), bytes: 50 * MB, used: minutes(45) },
+        ];
+        // 500 MB against a 100 MB limit: only the idle one can go, though
+        // that leaves the cache well over.
+        let gone = to_remove(all, now, None, Some(100 * MB));
+        assert_eq!(names(&gone), ["idle"]);
+    }
+
+    #[test]
+    fn the_log_is_cut_at_a_line_whatever_it_holds() {
+        // Two-byte characters, so most places are not ones text can be
+        // cut at; and bytes that are not text at all.
+        let line = "couldn't open /home/zoë/Téléchargements/fichier\n";
+        let log = line.repeat(40);
+        for keep in 0..line.len() * 2 {
+            let tail = log_tail(log.as_bytes(), keep);
+            assert!(tail.is_empty() || tail.starts_with(b"couldn't"), "keep {keep}");
+            assert!(tail.len() <= keep, "keep {keep}");
+        }
+        assert_eq!(log_tail(b"\xff\xfe\nlast line\n", 12), b"last line\n");
+        assert_eq!(log_tail(b"no line break at all", 5), b"");
     }
 
     #[test]

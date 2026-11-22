@@ -240,12 +240,31 @@ fn store_page(conn: &mut rusqlite::Connection, messages: &[Message]) -> Result<u
     store::put(conn, &rows)
 }
 
+/// Whether the text is still wanted. Asked of the database every time
+/// rather than remembered, because `fizz index delete` can be run while
+/// another Fizz is open, and the one that is running has to obey it: if it
+/// went on storing what arrives, the text would be back, with search off
+/// and nothing to say it was there.
+fn still_wanted(conn: &rusqlite::Connection) -> bool {
+    let wanted = store::state(conn, ENABLED_KEY).is_some_and(|v| v == "1");
+    if !wanted {
+        ENABLED.store(1, Ordering::Relaxed);
+    }
+    wanted
+}
+
 /// Keep the store complete: catch up on anything newer than what is held,
 /// follow history back to the beginning, and add messages as they arrive.
+///
+/// Returns `Ok` when there is nothing more to do: the pages asked for are
+/// in, the app has gone, or the index was turned off. An error (the server
+/// did not answer, the database was busy) leaves everything as it was, and
+/// calling this again carries on from there; `live` is borrowed so that
+/// what arrives in between is still waiting.
 pub async fn run(
     api: Api,
     tx: UnboundedSender<AppEvent>,
-    mut live: UnboundedReceiver<Message>,
+    live: &mut UnboundedReceiver<Message>,
     max_pages: Option<usize>,
 ) -> Result<()> {
     // An index from before the database: bring it across first. Half a
@@ -260,6 +279,14 @@ pub async fn run(
         }
     }
     let mut conn = store::open()?;
+    // Turned on before the database kept that fact (the old folder's
+    // marker said so): record it, so there is one place to ask.
+    if store::state(&conn, ENABLED_KEY).is_none() {
+        store::set_state(&conn, ENABLED_KEY, "1")?;
+    }
+    if !still_wanted(&conn) {
+        return Ok(());
+    }
     let mut progress = Progress::load();
     let report = |p: &Progress| {
         let _ = tx.send(AppEvent::Indexing(p.clone()));
@@ -270,6 +297,9 @@ pub async fn run(
     // Anything that arrived while Fizz was not running.
     while progress.newest > 0 {
         let page = api.history(None, Some(progress.newest), PAGE).await?;
+        if !still_wanted(&conn) {
+            return Ok(());
+        }
         let got = page.len();
         if let Some(latest) = page.iter().map(|m| m.date_created).max() {
             progress.stored += store_page(&mut conn, &page)?;
@@ -318,6 +348,9 @@ pub async fn run(
         }
         let before = (progress.oldest > 0).then_some(progress.oldest);
         let (page, total) = api.history_with_total(before, PAGE).await?;
+        if !still_wanted(&conn) {
+            return Ok(());
+        }
         pages += 1;
         if progress.total.is_none() || before.is_none() {
             progress.total = total;
@@ -347,6 +380,9 @@ pub async fn run(
     // From here on, keep in step with what the app hears: new messages are
     // added, an edited one has its text replaced, an unsent one is removed.
     while let Some(message) = live.recv().await {
+        if !still_wanted(&conn) {
+            return Ok(());
+        }
         if message.date_retracted.is_some() {
             store::remove(&conn, &message.guid);
             continue;

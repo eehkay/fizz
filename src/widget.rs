@@ -204,11 +204,18 @@ fn remove() -> Result<()> {
 
 pub fn command(args: &[String]) -> Result<()> {
     let has = |word: &str| args.iter().any(|a| a == word);
-    if has("install") {
+    // What to do is the word after "widget", not one found anywhere.
+    let action = args
+        .iter()
+        .skip_while(|a| *a != "widget")
+        .skip(1)
+        .map(String::as_str)
+        .find(|a| !a.starts_with('-'));
+    if action == Some("install") {
         install(has("--demo"), wanted_section(args)?)
-    } else if has("remove") {
+    } else if action == Some("remove") {
         remove()
-    } else if has("refresh") {
+    } else if action == Some("refresh") {
         refresh()
     } else {
         println!("{HELP}");

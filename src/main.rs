@@ -76,6 +76,19 @@ Inside the app, press ? (or F1 while typing) for a list of every key.
 
 FIZZ_NOTIFY=0 turns off desktop notifications for new messages.";
 
+/// The first argument from `from` on that is a word rather than a flag,
+/// and where it is. Flags can come anywhere, but what Fizz is being asked
+/// to do is only ever the first word; the words after it belong to it.
+/// `fizz index count update` counts messages that say "update", and must
+/// never be taken for an update (or `... count delete` for a deletion).
+fn first_word(args: &[String], from: usize) -> Option<(usize, &str)> {
+    args.iter()
+        .enumerate()
+        .skip(from)
+        .map(|(i, arg)| (i, arg.as_str()))
+        .find(|(_, arg)| !arg.starts_with('-'))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // For the commands that print and exit: if whatever is reading the
@@ -84,6 +97,8 @@ async fn main() -> Result<()> {
     quiet_on_closed_pipe(true);
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
+    let command = first_word(&args, 0).map(|(_, word)| word);
+    let is = |name: &str| command == Some(name);
 
     if has("--help") || has("-h") {
         println!("{HELP}");
@@ -104,10 +119,10 @@ async fn main() -> Result<()> {
     if let Some(i) = args.iter().position(|a| a == "--snapshot") {
         return snapshot(args.get(i + 1).map(String::as_str));
     }
-    if has("config") {
+    if is("config") {
         return config::edit_settings();
     }
-    if has("storage") {
+    if is("storage") {
         // What each store is using against its limit. Trim first, so the
         // figures are what the limits leave.
         storage::trim();
@@ -131,10 +146,10 @@ async fn main() -> Result<()> {
         println!("\nLimits are in the settings: fizz config  (see [search] and [media])");
         return Ok(());
     }
-    if has("update") {
+    if is("update") {
         return update::update(has("--check")).await;
     }
-    if has("sound") {
+    if is("sound") {
         // Play the notification sound, to hear it or check it works.
         let chosen = config::settings().notifications.sound.clone();
         let (what, choice) = match chosen.trim() {
@@ -149,10 +164,10 @@ async fn main() -> Result<()> {
         std::thread::sleep(Duration::from_millis(600));
         return Ok(());
     }
-    if has("widget") {
+    if is("widget") {
         return widget::command(&args);
     }
-    if has("bridge") {
+    if is("bridge") {
         // For a status-bar widget: no interface, and nothing asked of whoever
         // started it, so missing server details are an error, not a prompt.
         let config = match has("--demo") {
@@ -164,7 +179,7 @@ async fn main() -> Result<()> {
     if has("--demo") {
         return run(None).await;
     }
-    if has("setup") {
+    if is("setup") {
         let done = setup::run().await?;
         if done.verified {
             check(&done.config).await?;
@@ -178,13 +193,13 @@ async fn main() -> Result<()> {
         // First run: ask, then carry on into the app.
         None => setup::run().await?.config,
     };
-    if has("check") {
+    if is("check") {
         return check(&config).await;
     }
-    if has("index") {
+    if is("index") {
         return index_command(&args, &config).await;
     }
-    if let Some(unknown) = args.first() {
+    if let Some(unknown) = command.or(args.first().map(String::as_str)) {
         eprintln!("Unknown argument: {unknown}\n\n{HELP}");
         std::process::exit(2);
     }
@@ -236,12 +251,17 @@ async fn check(config: &Config) -> Result<()> {
 /// that searching by words uses.
 async fn index_command(args: &[String], config: &Config) -> Result<()> {
     let has = |word: &str| args.iter().any(|a| a == word);
-    if has("delete") {
+    // What to do is the word after "index"; anything further on is that
+    // command's own.
+    let index_at = first_word(args, 0).map_or(0, |(i, _)| i);
+    let action = first_word(args, index_at + 1);
+    let is = |name: &str| action.is_some_and(|(_, word)| word == name);
+    if is("delete") {
         index::delete()?;
         println!("The search index has been removed and turned off.");
         return Ok(());
     }
-    if has("build") {
+    if is("build") {
         // Download in the foreground, optionally only so many pages.
         let pages = args
             .iter()
@@ -251,8 +271,10 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
         index::enable()?;
         let api = Api::new(config)?;
         let (tx, mut rx) = unbounded_channel();
-        let (_live_tx, live_rx) = unbounded_channel();
-        let work = tokio::spawn(index::run(api, tx, live_rx, pages.or(Some(usize::MAX))));
+        let (_live_tx, mut live_rx) = unbounded_channel();
+        let work = tokio::spawn(async move {
+            index::run(api, tx, &mut live_rx, pages.or(Some(usize::MAX))).await
+        });
         while let Some(event) = rx.recv().await {
             if let app::AppEvent::Indexing(p) = event {
                 println!(
@@ -264,7 +286,7 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
         }
         return work.await?;
     }
-    if let Some(i) = args.iter().position(|a| a == "count") {
+    if let Some((i, "count")) = action {
         // How many messages contain these words, and how long finding out took.
         let query = args[i + 1..].join(" ");
         let conn = store::open()?;
@@ -287,7 +309,7 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
         );
         return Ok(());
     }
-    if has("upgrade") {
+    if is("upgrade") {
         // Bring an index kept as text files into the database. Normally
         // this happens by itself the next time Fizz starts.
         let started = std::time::Instant::now();
@@ -491,4 +513,25 @@ fn snapshot(size: Option<&str>) -> Result<()> {
         println!("{}", row.trim_end());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_word;
+
+    #[test]
+    fn only_the_first_word_is_a_command() {
+        let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        let command = |words: &[&str]| first_word(&args(words), 0).map(|(_, w)| w.to_string());
+        assert_eq!(command(&["index", "count", "update"]).as_deref(), Some("index"));
+        assert_eq!(command(&["--demo", "bridge"]).as_deref(), Some("bridge"));
+        assert_eq!(command(&["update", "--check"]).as_deref(), Some("update"));
+        assert_eq!(command(&["--demo"]), None);
+        assert_eq!(command(&[]), None);
+        // And the same one level down: what `index` is asked to do.
+        let counting = args(&["index", "count", "delete", "everything"]);
+        assert_eq!(first_word(&counting, 1), Some((1, "count")));
+        assert_eq!(first_word(&args(&["index", "--keep", "upgrade"]), 1), Some((2, "upgrade")));
+        assert_eq!(first_word(&args(&["index"]), 1), None);
+    }
 }

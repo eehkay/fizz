@@ -507,7 +507,10 @@ impl Api {
         if !response.status().is_success() {
             return Err(download_error(response).await);
         }
-        Ok(response.bytes().await?.to_vec())
+        // Through `friendly` like every other failure: an error from
+        // reading the reply carries the request's address, password and
+        // all, and these errors are written to the log.
+        Ok(response.bytes().await.map_err(friendly)?.to_vec())
     }
 }
 
@@ -569,6 +572,30 @@ pub const UNREACHABLE: &str = "can't reach the server";
 #[cfg(test)]
 mod tests {
     use super::encode;
+
+    #[tokio::test]
+    async fn a_failed_download_does_not_repeat_the_password() {
+        use std::io::{Read, Write};
+        // A server that promises a thousand bytes and hangs up after five.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let _ = stream.read(&mut [0u8; 4096]);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nshort");
+            }
+        });
+        let api = super::Api::new(&crate::config::Config {
+            url: format!("http://127.0.0.1:{port}"),
+            password: "hunter2secret".into(),
+        })
+        .unwrap();
+        let error = api.attachment("some-picture").await.unwrap_err();
+        // However it is written out: the log uses the first of these.
+        for text in [format!("{error:#}"), format!("{error}"), format!("{error:?}")] {
+            assert!(!text.contains("hunter2secret") && !text.contains("password"), "{text}");
+        }
+    }
 
     #[test]
     fn encodes_chat_guids() {

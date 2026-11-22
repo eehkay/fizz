@@ -126,9 +126,10 @@ pub fn open(path: impl AsRef<std::ffi::OsStr>) -> Result<()> {
     let mut command = if cfg!(target_os = "macos") {
         Command::new("open")
     } else if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.args(["/C", "start", ""]);
-        c
+        // Not through `cmd /C start`: a web address is someone else's
+        // text, and to the command prompt an `&` in it starts a second
+        // command. Explorer is handed it as one argument and opens it.
+        Command::new("explorer")
     } else {
         Command::new("xdg-open")
     };

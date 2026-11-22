@@ -117,11 +117,16 @@ pub fn log(line: &str) {
     use std::io::Write as _;
     let dir = cache_dir();
     let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("fizz.log"))
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    // Errors are the server's and the system's own words, so the log is
+    // kept to its owner like everything else Fizz writes about messages.
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(dir.join("fizz.log")) {
         let _ = writeln!(file, "{} {line}", chrono::Local::now().format("%F %T"));
     }
 }
@@ -482,24 +487,31 @@ impl Settings {
 
 static SETTINGS: OnceLock<(Settings, Option<String>)> = OnceLock::new();
 
-fn loaded() -> &'static (Settings, Option<String>) {
-    SETTINGS.get_or_init(|| {
-        let path = settings_path();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => match Settings::parse(&text) {
-                Ok(settings) => (settings, None),
-                Err(problem) => (Settings::default(), Some(problem)),
-            },
-            Err(_) => {
-                // First run: leave the options where they can be found.
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                let _ = std::fs::write(&path, SETTINGS_TEMPLATE);
-                (Settings::default(), None)
+/// Read the settings file at `path`: the settings to use, and what is
+/// wrong with the file if it could not be used. Only a file that is not
+/// there is written out afresh. One that is there but cannot be read (a
+/// stray character that is not text, say) is somebody's settings, and is
+/// left exactly as it is.
+fn read_settings(path: &std::path::Path) -> (Settings, Option<String>) {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match Settings::parse(&text) {
+            Ok(settings) => (settings, None),
+            Err(problem) => (Settings::default(), Some(problem)),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // First run: leave the options where they can be found.
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
             }
+            let _ = std::fs::write(path, SETTINGS_TEMPLATE);
+            (Settings::default(), None)
         }
-    })
+        Err(e) => (Settings::default(), Some(format!("it could not be read ({e})"))),
+    }
+}
+
+fn loaded() -> &'static (Settings, Option<String>) {
+    SETTINGS.get_or_init(|| read_settings(&settings_path()))
 }
 
 /// The preferences in force. Read once, at first use.
@@ -558,6 +570,26 @@ mod tests {
     fn template_matches_defaults() {
         let parsed = Settings::parse(SETTINGS_TEMPLATE).unwrap();
         assert_eq!(format!("{parsed:?}"), format!("{:?}", Settings::default()));
+    }
+
+    #[test]
+    fn a_settings_file_that_cannot_be_read_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("fizz-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Missing: written out with the defaults, and nothing to report.
+        let fresh = dir.join("fresh.toml");
+        let (settings, problem) = read_settings(&fresh);
+        assert!(problem.is_none() && settings.media.pictures);
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), SETTINGS_TEMPLATE);
+        // There, but not text: reported, defaults used, file untouched.
+        let odd = dir.join("odd.toml");
+        let mine = b"# caf\xe9\n[media]\npictures = false\n".to_vec();
+        std::fs::write(&odd, &mine).unwrap();
+        let (settings, problem) = read_settings(&odd);
+        assert!(settings.media.pictures);
+        assert!(problem.is_some_and(|p| p.contains("could not be read")));
+        assert_eq!(std::fs::read(&odd).unwrap(), mine);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

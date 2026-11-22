@@ -242,18 +242,35 @@ impl Convo {
             Self::upsert(&mut self.reaction_events, message);
             return false;
         }
-        if message.is_from_me && !self.messages.iter().any(|m| m.guid == message.guid) {
-            // The real copy of something we just sent: drop our placeholder.
+        if message.is_from_me
+            && !message.pending
+            && !self.messages.iter().any(|m| m.guid == message.guid)
+        {
+            // The server's copy of something we just sent, heard about
+            // before the send itself answered: drop our placeholder. Only
+            // when there is no doubt which one it is, though. With the
+            // same text going out twice, each placeholder waits for its
+            // own send to answer (see `confirm`), so that one which fails
+            // is still there to say so.
             let body = message.body();
-            if let Some(i) = self
+            let mut waiting = self
                 .messages
                 .iter()
-                .position(|m| m.pending && m.body() == body)
-            {
-                self.messages.remove(i);
+                .enumerate()
+                .filter(|(_, m)| m.pending && m.body() == body)
+                .map(|(i, _)| i);
+            if let (Some(only), None) = (waiting.next(), waiting.next()) {
+                self.messages.remove(only);
             }
         }
         Self::upsert(&mut self.messages, message)
+    }
+
+    /// A send has answered: put the server's copy of the message in place
+    /// of the placeholder that stood for it.
+    fn confirm(&mut self, temp: &str, real: Message) {
+        self.messages.retain(|m| m.guid != temp);
+        Self::upsert(&mut self.messages, real);
     }
 
     fn settle(&mut self) {
@@ -1029,15 +1046,40 @@ impl App {
     /// Start keeping message text on this computer, and keep it current.
     fn start_index(&mut self) {
         let Some(api) = self.api.clone() else { return };
-        if self.index_tx.is_some() {
+        // Already going. (Once it has ended, because the index was turned
+        // off from outside, its end of this channel is closed.)
+        if self.index_tx.as_ref().is_some_and(|tx| !tx.is_closed()) {
             return;
         }
-        let (live_tx, live_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (live_tx, mut live_rx) = tokio::sync::mpsc::unbounded_channel();
         self.index_tx = Some(live_tx);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::index::run(api, tx, live_rx, None).await {
-                crate::config::log(&format!("search index stopped: {e:#}"));
+            // One request the server does not answer must not end this for
+            // the rest of the session: wait, then carry on from where it
+            // stopped, less and less often while the trouble lasts.
+            const FIRST_WAIT: Duration = Duration::from_secs(5);
+            const LONGEST_WAIT: Duration = Duration::from_secs(300);
+            let mut wait = FIRST_WAIT;
+            loop {
+                let began = Instant::now();
+                let Err(e) = crate::index::run(api.clone(), tx.clone(), &mut live_rx, None).await
+                else {
+                    return;
+                };
+                if tx.is_closed() {
+                    return;
+                }
+                if began.elapsed() > Duration::from_secs(60) {
+                    // It had been working: this is new trouble.
+                    wait = FIRST_WAIT;
+                }
+                crate::config::log(&format!(
+                    "search index paused: {e:#}; trying again in {} s",
+                    wait.as_secs()
+                ));
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(LONGEST_WAIT);
             }
         });
     }
@@ -1211,8 +1253,22 @@ impl App {
 
     // ----- conversations -----------------------------------------------
 
+    /// Drop whatever was half-done in the open conversation: an edit (the
+    /// message box goes back to the draft it held before), a reply, a
+    /// tapback being chosen, an unsend waiting for its answer. Each names
+    /// a message in that conversation, so none may outlive it being open.
+    fn drop_unfinished(&mut self) {
+        if let Some((_, _, draft)) = self.editing.take() {
+            self.input.set(draft);
+        }
+        self.replying = None;
+        self.reacting = None;
+        self.unsending = None;
+    }
+
     pub fn open_chat(&mut self, guid: &str) {
         if self.open.as_deref() != Some(guid) {
+            self.drop_unfinished();
             if let Some(previous) = self.open.take() {
                 let draft = self.input.take();
                 let files = std::mem::take(&mut self.pending_files);
@@ -1868,6 +1924,7 @@ impl App {
         self.drafts.remove(guid);
         self.unread.remove(guid);
         if self.open.as_deref() == Some(guid) {
+            self.drop_unfinished();
             self.open = None;
             self.images.clear();
             self.gif_budget = PLAYING_GIFS;
@@ -2922,11 +2979,10 @@ impl App {
                 let convo = self.convos.entry(chat.clone()).or_default();
                 match result {
                     Ok(real) => {
-                        convo.messages.retain(|m| m.guid != temp);
                         if let Some(c) = self.chats.iter_mut().find(|c| c.guid == chat) {
                             c.last_message = Some(real.clone());
                         }
-                        convo.absorb(real);
+                        convo.confirm(&temp, real);
                     }
                     Err(e) => {
                         if let Some(m) = convo.messages.iter_mut().find(|m| m.guid == temp) {
@@ -2979,8 +3035,24 @@ impl App {
                         self.cursor = Some(guid.clone());
                     }
                     if was_open {
+                        // Only the conversation's id has changed: what is
+                        // being written in it, and the files waiting to
+                        // go, stay where they are.
+                        let typed = self.input.take();
+                        let files = std::mem::take(&mut self.pending_files);
                         self.open = None;
                         self.open_chat(&guid);
+                        self.input.set(typed);
+                        self.pending_files = files;
+                    } else {
+                        // Left for another conversation meanwhile: its
+                        // draft is filed under the old id.
+                        if let Some(text) = self.drafts.remove(&draft) {
+                            self.drafts.insert(guid.clone(), text);
+                        }
+                        if let Some(files) = self.draft_files.remove(&draft) {
+                            self.draft_files.insert(guid.clone(), files);
+                        }
                     }
                 }
                 Err(e) => {
@@ -3780,6 +3852,168 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(!app.filtering);
         assert_eq!(app.open.as_deref(), Some(most.chat.as_str()));
+    }
+
+    /// One of our own messages in the open conversation, selected.
+    fn select_own_message(app: &mut App) -> String {
+        let chat = app.open.clone().unwrap();
+        let guid = app.convos[&chat]
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.is_from_me && !m.body().is_empty())
+            .map(|m| m.guid.clone())
+            .expect("the demo's first conversation has a message of ours");
+        app.selected = Some(format!("text:{guid}"));
+        app.focus = Focus::Browse;
+        guid
+    }
+
+    #[test]
+    fn nothing_half_done_follows_you_to_another_conversation() {
+        let mut app = demo();
+        let first = app.open.clone().unwrap();
+        let second = app.chats.iter().find(|c| c.guid != first).unwrap().guid.clone();
+        let count = |app: &App, chat: &str| app.convos[chat].messages.len();
+
+        // An edit: leaving drops it and puts the draft back where it was.
+        app.input.set("a draft for the first".into());
+        let edited = select_own_message(&mut app);
+        let original = app.selected_message().unwrap().0.body();
+        app.start_editing();
+        assert!(app.editing.is_some());
+        app.input.set("changed my mind".into());
+        app.open_chat(&second);
+        assert!(app.editing.is_none());
+        assert!(app.input.is_empty(), "the second conversation has no draft");
+        // What is typed and sent here is a new message here, and the
+        // message that was being edited is as it was.
+        let before = count(&app, &second);
+        app.input.set("meant for the second".into());
+        app.send();
+        assert_eq!(count(&app, &second), before + 1);
+        assert_eq!(app.convos[&second].messages.last().unwrap().body(), "meant for the second");
+        let untouched = app.convos[&first].messages.iter().find(|m| m.guid == edited).unwrap();
+        assert_eq!(untouched.body(), original);
+        app.open_chat(&first);
+        assert_eq!(app.input.text(), "a draft for the first");
+
+        // A reply, a tapback being chosen, an unsend waiting for its answer.
+        select_own_message(&mut app);
+        app.start_replying();
+        assert!(app.replying.is_some());
+        app.open_chat(&second);
+        assert!(app.replying.is_none());
+        app.open_chat(&first);
+        select_own_message(&mut app);
+        app.start_reacting();
+        assert!(app.reacting.is_some());
+        app.open_chat(&second);
+        assert!(app.reacting.is_none());
+        app.open_chat(&first);
+        select_own_message(&mut app);
+        app.start_unsending();
+        assert!(app.unsending.is_some());
+        app.open_chat(&second);
+        assert!(app.unsending.is_none());
+        // Opening the conversation already open changes none of this.
+        app.open_chat(&first);
+        select_own_message(&mut app);
+        app.start_replying();
+        app.open_chat(&first);
+        assert!(app.replying.is_some());
+    }
+
+    fn sending(guid: &str, text: &str) -> Message {
+        Message {
+            guid: guid.into(),
+            text: Some(text.into()),
+            is_from_me: true,
+            date_created: 1_790_000_000_000,
+            pending: true,
+            ..Message::default()
+        }
+    }
+
+    fn sent(guid: &str, text: &str) -> Message {
+        Message {
+            pending: false,
+            ..sending(guid, text)
+        }
+    }
+
+    #[test]
+    fn the_same_text_sent_twice_is_two_messages() {
+        let mut app = demo();
+        let chat = app.open.clone().unwrap();
+        let waiting = |app: &App| -> Vec<String> {
+            let mut guids: Vec<String> = app.convos[&chat]
+                .messages
+                .iter()
+                .filter(|m| m.body() == "ok")
+                .map(|m| m.guid.clone())
+                .collect();
+            guids.sort();
+            guids
+        };
+        let convo = app.convos.get_mut(&chat).unwrap();
+        convo.absorb(sending("temp-1", "ok"));
+        convo.absorb(sending("temp-2", "ok"));
+        assert_eq!(waiting(&app), ["temp-1", "temp-2"]);
+        // The first is confirmed; the second is still on its way.
+        app.on_event(AppEvent::Sent {
+            chat: chat.clone(),
+            temp: "temp-1".into(),
+            result: Ok(sent("REAL-1", "ok")),
+        });
+        assert_eq!(waiting(&app), ["REAL-1", "temp-2"]);
+        // Hearing of the first again from the live connection changes nothing.
+        app.convos.get_mut(&chat).unwrap().absorb(sent("REAL-1", "ok"));
+        assert_eq!(waiting(&app), ["REAL-1", "temp-2"]);
+        // The second is refused: it is there to say so, and to be retried.
+        app.on_event(AppEvent::Sent {
+            chat: chat.clone(),
+            temp: "temp-2".into(),
+            result: Err("send failed".into()),
+        });
+        let failed = app.convos[&chat].messages.iter().find(|m| m.guid == "temp-2").unwrap();
+        assert!(failed.failed.is_some() && !failed.pending);
+    }
+
+    #[test]
+    fn a_lone_placeholder_gives_way_to_the_real_message() {
+        // The live connection can deliver our own message before the send
+        // answers. With one message waiting there is no doubt which it is.
+        let mut convo = Convo::default();
+        convo.absorb(sending("temp-1", "on my way"));
+        convo.absorb(sent("REAL-1", "on my way"));
+        assert_eq!(convo.messages.iter().map(|m| m.guid.as_str()).collect::<Vec<_>>(), ["REAL-1"]);
+        // And the send's own answer, arriving after, adds nothing.
+        convo.confirm("temp-1", sent("REAL-1", "on my way"));
+        assert_eq!(convo.messages.len(), 1);
+    }
+
+    #[test]
+    fn a_new_conversation_keeps_what_is_being_written() {
+        let mut app = demo();
+        app.open_draft("+15550109999");
+        let draft = app.open.clone().unwrap();
+        assert!(draft.starts_with("new:"));
+        // The first message has gone; a second is being typed, with a file.
+        app.input.set("and another thing".into());
+        app.pending_files = vec![PathBuf::from("/tmp/picture.png")];
+        app.on_event(AppEvent::Started {
+            draft: draft.clone(),
+            temp: "temp-1".into(),
+            result: Ok(Chat {
+                guid: "iMessage;-;+15550109999".into(),
+                ..Chat::default()
+            }),
+        });
+        assert_eq!(app.open.as_deref(), Some("iMessage;-;+15550109999"));
+        assert_eq!(app.input.text(), "and another thing");
+        assert_eq!(app.pending_files.len(), 1);
+        assert!(!app.chats.iter().any(|c| c.guid == draft));
     }
 
     #[test]
