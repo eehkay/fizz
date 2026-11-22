@@ -2974,7 +2974,21 @@ impl App {
                 self.sort_chats();
                 self.request_images();
             }
-            AppEvent::Online(online) => self.online = Some(online),
+            AppEvent::Online(online) => {
+                // Back in touch: the helper may have come or gone meanwhile.
+                if online
+                    && self.online == Some(false)
+                    && let Some(api) = self.api.clone()
+                {
+                    let tx = self.tx.clone();
+                    tokio::spawn(async move {
+                        if let Ok(info) = api.server_info().await {
+                            let _ = tx.send(AppEvent::Info(info));
+                        }
+                    });
+                }
+                self.online = Some(online);
+            }
             AppEvent::Sent { chat, temp, result } => {
                 let convo = self.convos.entry(chat.clone()).or_default();
                 match result {

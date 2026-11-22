@@ -319,7 +319,7 @@ impl Default for Messages {
     fn default() -> Self {
         Messages {
             default_country_code: "+1".into(),
-            send_method: "apple-script".into(),
+            send_method: "auto".into(),
             emoji_popup: true,
             poll_seconds: 12,
             mark_read: true,
@@ -428,9 +428,11 @@ file_cache_days = 14
 [messages]
 # Added to phone numbers typed without a country code when starting a chat.
 default_country_code = "+1"
-# How the Mac sends: "apple-script" works everywhere; "private-api" needs
-# the BlueBubbles Private API helper connected on the server.
-send_method = "apple-script"
+# How the Mac sends. "auto" sends text through the BlueBubbles Private API
+# helper when it is connected and by AppleScript when it is not (files
+# always go by AppleScript). "apple-script" or "private-api" always uses
+# that one.
+send_method = "auto"
 # The :name emoji popup while typing.
 emoji_popup = true
 # How often to check for anything the live connection missed, in seconds.
@@ -469,9 +471,9 @@ impl Settings {
         s.media.picture_columns = s.media.picture_columns.clamp(8, 160);
         s.media.picture_rows = s.media.picture_rows.clamp(4, 80);
         s.messages.poll_seconds = s.messages.poll_seconds.clamp(3, 600);
-        if !["apple-script", "private-api"].contains(&s.messages.send_method.as_str()) {
+        if !["auto", "apple-script", "private-api"].contains(&s.messages.send_method.as_str()) {
             return Err(format!(
-                "send_method must be \"apple-script\" or \"private-api\", not \"{}\"",
+                "send_method must be \"auto\", \"apple-script\" or \"private-api\", not \"{}\"",
                 s.messages.send_method
             ));
         }

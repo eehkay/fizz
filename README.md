@@ -576,8 +576,10 @@ typing indicators, marking chats read, and creating and deleting chats.
 What Fizz uses it for today:
 
 - `fizz check` reports whether the helper is connected.
-- Setting `send_method = "private-api"` in the settings file sends through
-  it.
+- Text is sent through it whenever it is connected, and by AppleScript when
+  it is not (`send_method = "auto"`, the default). Files always go by
+  AppleScript. Set `send_method` to `"apple-script"` or `"private-api"`
+  to use one for everything.
 - Opening a chat marks it read on the Mac, which clears it on your other
   devices.
 - Tapbacks: select a message with `Tab`, press `r`, and pick one of the
@@ -699,10 +701,15 @@ which is how Messages keeps its own database on a Mac. Anything under
 
 ## Good to know
 
-- Sending uses the server's AppleScript method, so it works without the
-  BlueBubbles Private API. Tapbacks, replies, edits, unsending, typing
-  indicators, new groups, deleting chats and marking chats read all need
-  that API, and work once it is connected.
+- Sending works without the BlueBubbles Private API, using the server's
+  AppleScript method; with the helper connected, text goes through that
+  instead. Tapbacks, replies, edits, unsending, typing indicators, new
+  groups, deleting chats and marking chats read all need that API, and
+  work once it is connected.
+- The Mac decides at each send whether a message goes as iMessage or as a
+  text (SMS or RCS); Fizz has no say. Where a conversation has used both,
+  the reply box says what the last message went as rather than guess the
+  next.
 - Unread dots: Fizz remembers which conversations you have opened (in
   `~/.local/state/fizz/seen.json`), so they stay read across restarts.
   Marking them read on the Mac and your other devices needs the Private

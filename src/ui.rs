@@ -735,7 +735,7 @@ fn draw_stats(frame: &mut Frame, app: &mut App, area: Rect) {
         ));
         data.push(row("Database", file_size(index)));
     }
-    if let Some(p) = &app.indexing {
+    if let Some(p) = app.indexing.as_ref().filter(|_| crate::index::enabled()) {
         data.push(row(
             "Search index",
             match (p.complete, p.percent()) {
@@ -1412,16 +1412,7 @@ fn draw_convo(frame: &mut Frame, app: &mut App, area: Rect) {
         let hint = if chip_rows > 0 {
             "Add a message, or press Enter to send".to_string()
         } else {
-            // Say what kind of message this will be, as a phone does.
-            let kind = app
-                .convos
-                .get(&chat.guid)
-                .and_then(|convo| services_of(convo, &chat).last().copied().flatten());
-            let lead = match kind {
-                Some(Service::IMessage) => format!("iMessage to {name}"),
-                Some(other) => format!("Text message ({}) to {name}", other.label()),
-                None => format!("Message {name}"),
-            };
+            let lead = service_lead(app.convos.get(&chat.guid), &chat, &name);
             format!("{lead} · drop a file here to attach it")
         };
         let hint = truncate(&hint, usize::from(inner.width));
@@ -1752,6 +1743,35 @@ fn draw_timeline(frame: &mut Frame, app: &mut App, chat: &Chat, view: Rect) {
     }
     app.wants_older = wants_older;
     app.wants_newer = wants_newer;
+}
+
+/// What the reply box says about how a message will travel, as a phone
+/// does. The Mac picks the service afresh at each send, so where a
+/// conversation has used more than one, this reports the last one seen
+/// instead of promising the next.
+fn service_lead(convo: Option<&Convo>, chat: &Chat, name: &str) -> String {
+    let Some(convo) = convo else {
+        return format!("Message {name}");
+    };
+    // Only what the server recorded, not what is assumed for the rest.
+    let known: Vec<(Service, bool)> = convo
+        .messages
+        .iter()
+        .filter_map(|m| Some((m.handle.as_ref()?.service_kind()?, m.is_from_me)))
+        .collect();
+    let apple = known.iter().any(|(s, _)| *s == Service::IMessage);
+    let phone = known.iter().any(|(s, _)| *s != Service::IMessage);
+    if apple && phone
+        && let Some((last, mine)) = known.last()
+    {
+        let verb = if *mine { "sent" } else { "received" };
+        return format!("Message {name} · last {verb} as {}", last.label());
+    }
+    match services_of(convo, chat).last().copied().flatten() {
+        Some(Service::IMessage) => format!("iMessage to {name}"),
+        Some(other) => format!("Text message ({}) to {name}", other.label()),
+        None => format!("Message {name}"),
+    }
 }
 
 /// The service each message went by. The server says so for what you
@@ -2180,5 +2200,53 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     if show_hints {
         let spot = Rect::new(area.right() - right_width, area.y, right_width, 1);
         frame.render_widget(right, spot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Handle, Message};
+
+    fn message(service: Option<&str>, mine: bool) -> Message {
+        Message {
+            is_from_me: mine,
+            handle: service.map(|s| Handle { address: "+15550100".into(), service: Some(s.into()) }),
+            ..Message::default()
+        }
+    }
+
+    fn lead(messages: Vec<Message>) -> String {
+        let mut convo = Convo::default();
+        convo.messages = messages;
+        service_lead(Some(&convo), &Chat::default(), "Lee")
+    }
+
+    #[test]
+    fn the_reply_box_says_only_what_is_known() {
+        // One service throughout: say it, as a phone does.
+        assert_eq!(lead(vec![message(Some("iMessage"), false), message(None, true)]), "iMessage to Lee");
+        assert_eq!(lead(vec![message(Some("SMS"), false)]), "Text message (SMS) to Lee");
+        // Both have been used: report the last, without promising the next.
+        assert_eq!(
+            lead(vec![message(Some("iMessage"), false), message(None, true), message(Some("RCS"), true)]),
+            "Message Lee · last sent as RCS"
+        );
+        assert_eq!(
+            lead(vec![message(Some("RCS"), true), message(Some("iMessage"), false)]),
+            "Message Lee · last received as iMessage"
+        );
+        // Nothing known at all.
+        assert_eq!(lead(vec![message(None, true)]), "Message Lee");
+        assert_eq!(service_lead(None, &Chat::default(), "Lee"), "Message Lee");
+    }
+
+    #[test]
+    fn counts_are_set_apart_in_thousands() {
+        assert_eq!(grouped(7), "7");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1000), "1,000");
+        assert_eq!(grouped(91606), "91,606");
+        assert_eq!(grouped(1234567), "1,234,567");
     }
 }

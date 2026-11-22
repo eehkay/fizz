@@ -15,6 +15,21 @@ pub struct Api {
     password: String,
     /// Timings of every request, for the stats screen.
     pub metrics: crate::metrics::Shared,
+    /// Whether the server's Private API helper was connected when last
+    /// asked. Shared by every copy of this, and set by whoever asks.
+    helper: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Which way to send, from the `send_method` setting and whether the
+/// helper is there. `auto` sends text through the helper when it is
+/// connected; files stay with AppleScript unless the helper is asked for
+/// by name, as that is the route known to work everywhere.
+fn method_for(setting: &str, helper: bool, file: bool) -> &'static str {
+    match setting {
+        "private-api" => "private-api",
+        "auto" if helper && !file => "private-api",
+        _ => "apple-script",
+    }
 }
 
 /// Percent-encode a path segment (chat guids contain `;` and `+`).
@@ -46,6 +61,7 @@ impl Api {
             base: format!("{}/api/v1", config.url),
             password: config.password.clone(),
             metrics: crate::metrics::Shared::default(),
+            helper: Default::default(),
         })
     }
 
@@ -122,7 +138,28 @@ impl Api {
     }
 
     pub async fn server_info(&self) -> Result<ServerInfo> {
-        self.get("/server/info", &[]).await
+        let info: ServerInfo = self.get("/server/info", &[]).await?;
+        self.set_helper(info.private_api && info.helper_connected);
+        Ok(info)
+    }
+
+    /// Note whether the Private API helper is connected.
+    pub fn set_helper(&self, connected: bool) {
+        self.helper.store(connected, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether the setting leaves the way of sending to Fizz.
+    fn chose_for_itself(&self) -> bool {
+        crate::config::settings().messages.send_method == "auto"
+    }
+
+    /// The way to send a message (or, with `file`, an attachment) now.
+    fn method(&self, file: bool) -> &'static str {
+        method_for(
+            &crate::config::settings().messages.send_method,
+            self.helper.load(std::sync::atomic::Ordering::Relaxed),
+            file,
+        )
     }
 
     /// The newest messages across every chat, newest first. The chat list is
@@ -333,7 +370,7 @@ impl Api {
         let method = if addresses.len() > 1 {
             "private-api"
         } else {
-            send_method()
+            self.method(false)
         };
         self.post(
             "/chat/new",
@@ -370,18 +407,30 @@ impl Api {
         text: &str,
         reply_to: Option<(&str, usize)>,
     ) -> Result<Message> {
+        let method = self.method(false);
         let mut body = json!({
             "chatGuid": chat,
             "tempGuid": temp_guid,
             "message": text,
-            "method": send_method(),
+            "method": method,
         });
         if let Some((message, part)) = reply_to {
             body["method"] = json!("private-api");
             body["selectedMessageGuid"] = json!(message);
             body["partIndex"] = json!(part);
+            return self.post("/message/text", body).await;
         }
-        self.post("/message/text", body).await
+        match self.post("/message/text", body.clone()).await {
+            // Chosen by `auto` on the strength of a helper that has since
+            // gone: the server refused outright, so nothing was sent and
+            // the ordinary route can be used instead.
+            Err(e) if method == "private-api" && self.chose_for_itself() && helper_refused(&e.to_string()) => {
+                self.set_helper(false);
+                body["method"] = json!("apple-script");
+                self.post("/message/text", body).await
+            }
+            other => other,
+        }
     }
 
     /// Delete a whole conversation from Messages on the Mac. Needs the
@@ -447,7 +496,7 @@ impl Api {
             .text("chatGuid", chat.to_string())
             .text("tempGuid", temp_guid.to_string())
             .text("name", name)
-            .text("method", send_method())
+            .text("method", self.method(true))
             .part("attachment", part);
         let response = self
             .http
@@ -515,8 +564,11 @@ impl Api {
 }
 
 /// How the server should send: plain AppleScript, or the Private API.
-fn send_method() -> &'static str {
-    crate::config::settings().messages.send_method.as_str()
+/// Whether a send failed because the server has no Private API helper to
+/// hand it to, as opposed to anything that might have sent the message.
+fn helper_refused(error: &str) -> bool {
+    let error = error.to_lowercase();
+    error.contains("private api") && !error.contains("timed out") && !error.contains("timeout")
 }
 
 /// Explain a failed attachment download.
@@ -595,6 +647,27 @@ mod tests {
         for text in [format!("{error:#}"), format!("{error}"), format!("{error:?}")] {
             assert!(!text.contains("hunter2secret") && !text.contains("password"), "{text}");
         }
+    }
+
+    #[test]
+    fn picks_the_way_to_send() {
+        use super::method_for;
+        // Left to itself: text through the helper when there is one.
+        assert_eq!(method_for("auto", true, false), "private-api");
+        assert_eq!(method_for("auto", false, false), "apple-script");
+        assert_eq!(method_for("auto", true, true), "apple-script", "files stay with AppleScript");
+        // Said outright, it is obeyed either way.
+        assert_eq!(method_for("private-api", false, true), "private-api");
+        assert_eq!(method_for("apple-script", true, false), "apple-script");
+    }
+
+    #[test]
+    fn tells_a_missing_helper_from_other_failures() {
+        use super::helper_refused;
+        assert!(helper_refused("iMessage Private API Helper is not connected! (HTTP 500)"));
+        assert!(helper_refused("iMessage Private API is not enabled (HTTP 500)"));
+        assert!(!helper_refused("can't reach the server"));
+        assert!(!helper_refused("Private API send timed out (HTTP 500)"), "it may have gone");
     }
 
     #[test]
