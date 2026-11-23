@@ -758,11 +758,17 @@ which is how Messages keeps its own database on a Mac. Anything under
   text (SMS or RCS); Fizz has no say. Where a conversation has used both,
   the reply box says what the last message went as rather than guess the
   next.
-- Unread dots: Fizz remembers which conversations you have opened (in
-  `~/.local/state/fizz/seen.json`), so they stay read across restarts.
-  Marking them read on the Mac and your other devices needs the Private
-  API helper; once it is connected Fizz does that too (`mark_read` in the
-  settings turns it off).
+- Unread dots follow your other devices. Messages records when each
+  message was read, whichever device it was on, and Fizz goes by that: a
+  conversation you read or answer on your phone stops being unread here
+  and in the bar widget, usually within seconds. Fizz asks about each
+  unread conversation soon after it arrives and then less and less often,
+  so one left unread for hours may take up to ten minutes to catch up.
+- The other way round, opening a conversation in Fizz marks it read on
+  the Mac and your other devices. That needs the Private API helper
+  (`mark_read` in the settings turns it off). Fizz also keeps its own note
+  of what you have opened, in its database, so conversations stay read
+  across restarts without the helper.
 - Shrunken copies of pictures are cached in `~/.cache/fizz/thumbs`; delete
   the folder any time. Failures are noted in `~/.cache/fizz/fizz.log`.
 - Opened files (and videos fetched for their still) are kept in

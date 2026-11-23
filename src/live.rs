@@ -136,6 +136,25 @@ async fn socket(
                     .boxed()
                 }
             })
+            .on("chat-read-status-changed", {
+                let tx = tx.clone();
+                move |payload: Payload, _: Client| {
+                    let tx = tx.clone();
+                    async move {
+                        if let Payload::Text(values) = payload
+                            && let Some(event) = values.first()
+                            && let Some(chat) = event.get("chatGuid").and_then(|g| g.as_str())
+                            && let Some(read) = event.get("read").and_then(|r| r.as_bool())
+                        {
+                            let _ = tx.send(AppEvent::ReadStatus {
+                                chat: chat.to_string(),
+                                read,
+                            });
+                        }
+                    }
+                    .boxed()
+                }
+            })
             .on(rust_socketio::Event::Connect, mark(true))
             .on(rust_socketio::Event::Close, mark(false))
             .on(rust_socketio::Event::Error, mark(false))

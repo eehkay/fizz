@@ -298,6 +298,8 @@ pub async fn run(config: Option<Config>) -> Result<()> {
             }
             _ = marks.tick(), if !demo => {
                 app.reload_seen();
+                // And what was read on the phone, so the count comes down.
+                app.check_read_elsewhere();
             }
         }
     }

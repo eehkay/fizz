@@ -81,6 +81,17 @@ pub enum AppEvent {
         chat: String,
         on: bool,
     },
+    /// What the server holds as a conversation's newest received message,
+    /// asked for to find out whether it has been read on another device.
+    Newest {
+        chat: String,
+        message: Message,
+    },
+    /// The server says a conversation was marked read, or unread, elsewhere.
+    ReadStatus {
+        chat: String,
+        read: bool,
+    },
     /// A conversation has been deleted on the server (or it refused).
     Deleted {
         chat: String,
@@ -485,6 +496,9 @@ pub struct App {
     unconfirmed: HashSet<String>,
     last_saved: Instant,
     last_trimmed: Instant,
+    /// For each unread conversation, when the server was last asked
+    /// whether it has been read elsewhere, and how many times so far.
+    read_checks: HashMap<String, (Instant, u32)>,
     /// Fizz's database, for the small things written as you go.
     store: Option<rusqlite::Connection>,
     /// Whether the server can be told a chat was read.
@@ -639,6 +653,7 @@ impl App {
             unconfirmed: HashSet::new(),
             last_saved: Instant::now(),
             last_trimmed: Instant::now(),
+            read_checks: HashMap::new(),
             helper: false,
             marked: HashMap::new(),
             online: None,
@@ -901,6 +916,65 @@ impl App {
         chat.last_message.as_ref().is_some_and(|m| {
             !m.is_from_me && m.date_read.is_none() && m.item_type == 0 && m.date_created > seen_at
         })
+    }
+
+    /// A conversation was read on another device, as far as the message
+    /// received at `through`: it is not unread here either. Nothing is
+    /// sent to the server, which is where this was learnt.
+    fn read_elsewhere(&mut self, guid: &str, through: i64) {
+        self.unread.remove(guid);
+        self.read_checks.remove(guid);
+        if self.seen.get(guid).is_none_or(|at| *at < through) {
+            self.seen.insert(guid.to_string(), through);
+            if let Some(conn) = &self.store {
+                let _ = crate::store::set_seen(conn, guid, through);
+            }
+        }
+    }
+
+    /// Ask the server about the conversations that are unread here: have
+    /// they been read on the phone, or the Mac, since? Messages keeps the
+    /// date each message was read, whichever device it was on. Each is
+    /// asked about soon after it arrives and then less and less often, so
+    /// a reply sent from the phone clears the mark here within seconds
+    /// while a report nobody reads costs next to nothing.
+    pub fn check_read_elsewhere(&mut self) {
+        let Some(api) = self.api.clone() else { return };
+        if self.online == Some(false) {
+            return;
+        }
+        let now = Instant::now();
+        let due: Vec<String> = self
+            .chats
+            .iter()
+            .filter(|c| !c.is_draft() && self.open.as_deref() != Some(c.guid.as_str()) && self.is_unread(c))
+            .filter(|c| {
+                self.read_checks.get(&c.guid).is_none_or(|(asked, times)| {
+                    // 10 s, 20 s, 40 s... up to about ten minutes apart.
+                    now.duration_since(*asked) >= Duration::from_secs(10 << (*times).min(6))
+                })
+            })
+            .take(6)
+            .map(|c| c.guid.clone())
+            .collect();
+        for guid in due {
+            let entry = self.read_checks.entry(guid.clone()).or_insert((now, 0));
+            *entry = (now, entry.1 + 1);
+            let (api, tx) = (api.clone(), self.tx.clone());
+            tokio::spawn(async move {
+                // The newest few: the very newest may be a tapback or ours.
+                let Ok(page) = api.messages(&guid, None, None, 8).await else {
+                    return;
+                };
+                let newest = page
+                    .into_iter()
+                    .filter(|m| !m.is_from_me && m.item_type == 0 && m.reaction().is_none())
+                    .max_by_key(|m| m.date_created);
+                if let Some(message) = newest {
+                    let _ = tx.send(AppEvent::Newest { chat: guid, message });
+                }
+            });
+        }
     }
 
     fn seen_path() -> PathBuf {
@@ -3385,6 +3459,32 @@ impl App {
                     }
                 }
             }
+            AppEvent::Newest { chat, message } => {
+                if message.date_read.is_some() {
+                    // The preview's copy of it learns the same.
+                    if let Some(last) = self
+                        .chats
+                        .iter_mut()
+                        .find(|c| c.guid == chat)
+                        .and_then(|c| c.last_message.as_mut())
+                        .filter(|last| last.guid == message.guid)
+                    {
+                        last.date_read = message.date_read;
+                    }
+                    self.read_elsewhere(&chat, message.date_created);
+                }
+            }
+            AppEvent::ReadStatus { chat, read } => {
+                let latest = self.chats.iter().find(|c| c.guid == chat).map(Chat::last_activity);
+                match (read, latest) {
+                    (true, Some(latest)) => self.read_elsewhere(&chat, latest),
+                    (false, Some(_)) if self.open.as_deref() != Some(chat.as_str()) => {
+                        self.seen.remove(&chat);
+                        self.unread.insert(chat);
+                    }
+                    _ => {}
+                }
+            }
             AppEvent::Indexing(progress) => self.indexing = Some(progress),
             AppEvent::Found { generation, hits, mentions } => {
                 // Results for text that has since been edited are stale.
@@ -3589,6 +3689,7 @@ impl App {
             let is_open = self.open.as_deref() == Some(guid.as_str());
             let mut is_new = false;
             let mut read_now = false;
+            let mut read_elsewhere = false;
             // A view parked in the past must not have today's messages
             // appear straight after it; they load when it gets there.
             if let Some(convo) = self.convos.get_mut(&guid)
@@ -3610,11 +3711,18 @@ impl App {
                         .as_ref()
                         .is_none_or(|last| last.guid != message.guid);
                     chat.last_message = Some(message.clone());
-                    if fresh && !message.is_from_me {
+                    if !message.is_from_me && message.item_type == 0 && message.date_read.is_some() {
+                        // Read already, on another device: the phone had
+                        // the conversation open, or this is the news that
+                        // it has since been looked at there.
+                        read_elsewhere = true;
+                    } else if fresh && !message.is_from_me {
                         if is_open {
                             read_now = true;
                         } else {
                             self.unread.insert(guid.clone());
+                            // Newly unread: ask about it again soon.
+                            self.read_checks.remove(&guid);
                         }
                     } else if message.is_from_me && message.item_type == 0 {
                         // Answered, here or on another device: whatever
@@ -3622,6 +3730,9 @@ impl App {
                         self.unread.remove(&guid);
                     }
                 }
+            }
+            if read_elsewhere {
+                self.read_elsewhere(&guid, message.date_created);
             }
             if read_now {
                 // It arrived in the conversation you have open.
@@ -3793,6 +3904,7 @@ impl App {
             std::thread::spawn(crate::storage::trim);
         }
         self.sync_typing();
+        self.check_read_elsewhere();
         if self.stats {
             self.sample_usage();
         }
@@ -4853,6 +4965,86 @@ mod tests {
         let maya = app.chats[0].guid.clone();
         app.open_chat(&maya);
         assert_eq!(app.in_folder, None);
+    }
+
+    // ----- read on another device ------------------------------------------
+
+    fn received(chat: &str, guid: &str, at: i64, read: bool) -> Message {
+        Message {
+            guid: guid.into(),
+            text: Some("hello".into()),
+            date_created: at,
+            date_read: read.then_some(at + 5_000),
+            chats: vec![crate::model::ChatRef {
+                guid: chat.into(),
+                ..Default::default()
+            }],
+            ..Message::default()
+        }
+    }
+
+    fn unread_of(app: &App, chat: &str) -> bool {
+        app.is_unread(app.chats.iter().find(|c| c.guid == chat).unwrap())
+    }
+
+    #[test]
+    fn reading_on_the_phone_clears_the_mark_here() {
+        let mut app = demo();
+        let chat = app.chats[1].guid.clone();
+        let now = chrono::Utc::now().timestamp_millis();
+        app.on_incoming(received(&chat, "m1", now, false));
+        assert!(unread_of(&app, &chat));
+        // The server's news that the same message has now been read.
+        app.on_incoming(received(&chat, "m1", now, true));
+        assert!(!unread_of(&app, &chat));
+        // The next one to arrive is unread again.
+        app.on_incoming(received(&chat, "m2", now + 60_000, false));
+        assert!(unread_of(&app, &chat));
+    }
+
+    #[test]
+    fn a_message_read_as_it_arrived_is_never_marked() {
+        let mut app = demo();
+        let chat = app.chats[1].guid.clone();
+        let now = chrono::Utc::now().timestamp_millis();
+        // The phone had the conversation open when it came in.
+        app.on_incoming(received(&chat, "m1", now, true));
+        assert!(!unread_of(&app, &chat));
+    }
+
+    #[test]
+    fn asking_the_server_settles_an_unread_conversation() {
+        let mut app = demo();
+        let chat = app.chats[1].guid.clone();
+        let now = chrono::Utc::now().timestamp_millis();
+        app.on_incoming(received(&chat, "m1", now, false));
+        // Still unread there too: nothing changes.
+        app.on_event(AppEvent::Newest {
+            chat: chat.clone(),
+            message: received(&chat, "m1", now, false),
+        });
+        assert!(unread_of(&app, &chat));
+        // Read there since.
+        app.on_event(AppEvent::Newest {
+            chat: chat.clone(),
+            message: received(&chat, "m1", now, true),
+        });
+        assert!(!unread_of(&app, &chat));
+        let last = app.chats.iter().find(|c| c.guid == chat).unwrap().last_message.as_ref().unwrap();
+        assert!(last.date_read.is_some(), "the preview's copy knows too");
+    }
+
+    #[test]
+    fn the_server_saying_read_or_unread_is_followed() {
+        let mut app = demo();
+        let chat = app.chats[1].guid.clone();
+        let now = chrono::Utc::now().timestamp_millis();
+        app.on_incoming(received(&chat, "m1", now, false));
+        app.on_event(AppEvent::ReadStatus { chat: chat.clone(), read: true });
+        assert!(!unread_of(&app, &chat));
+        // Marked unread again from the phone.
+        app.on_event(AppEvent::ReadStatus { chat: chat.clone(), read: false });
+        assert!(unread_of(&app, &chat));
     }
 
 }
