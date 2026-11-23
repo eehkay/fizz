@@ -77,13 +77,22 @@ pub async fn local_copy(
     attachment: &Attachment,
     tx: Option<&UnboundedSender<AppEvent>>,
 ) -> Result<PathBuf> {
-    let dir = files_dir().join(encode(&attachment.guid));
-    if let Some(path) = existing(&dir) {
+    copy_into(api, attachment, &files_dir().join(encode(&attachment.guid)), tx).await
+}
+
+/// [`local_copy`], given the folder this attachment's copy lives in.
+async fn copy_into(
+    api: &Api,
+    attachment: &Attachment,
+    dir: &Path,
+    tx: Option<&UnboundedSender<AppEvent>>,
+) -> Result<PathBuf> {
+    if let Some(path) = existing(dir) {
         // Used again: keep it from being the next thing trimmed.
         crate::storage::touch(&path);
         return Ok(path);
     }
-    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::create_dir_all(dir).await?;
     // Its own name while it arrives: the same file can be wanted twice at
     // once (a video's still being made as you open the video), and two
     // downloads writing one file leave neither with a whole one.
@@ -546,6 +555,56 @@ pub fn read_clipboard() -> Result<Clipboard> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_same_file_can_be_fetched_twice_at_once() {
+        use std::io::{Read, Write};
+        // A server that sends a file in two halves with a pause between,
+        // so that two requests for it are under way together.
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let served = body.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let body = served.clone();
+                std::thread::spawn(move || {
+                    let _ = stream.read(&mut [0u8; 4096]);
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                    let (first, second) = body.split_at(body.len() / 2);
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(first);
+                    let _ = stream.flush();
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let _ = stream.write_all(second);
+                });
+            }
+        });
+        let api = Api::new(&crate::config::Config {
+            url: format!("http://127.0.0.1:{port}"),
+            password: "x".into(),
+        })
+        .unwrap();
+        let attachment = Attachment {
+            guid: "video-1".into(),
+            transfer_name: Some("clip.bin".into()),
+            ..Attachment::default()
+        };
+        let dir = std::env::temp_dir().join(format!("fizz-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // As when a video's still is being made and the video is opened.
+        let (one, two) = tokio::join!(
+            copy_into(&api, &attachment, &dir, None),
+            copy_into(&api, &attachment, &dir, None)
+        );
+        let (one, two) = (one.unwrap(), two.unwrap());
+        assert_eq!(one, two);
+        assert!(std::fs::read(&one).unwrap() == body, "the file is whole");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 1, "nothing half-written left behind: {left:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn names_are_made_safe() {
