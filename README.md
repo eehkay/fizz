@@ -25,6 +25,8 @@ conversations.
 - Start new conversations, send text, files and pictures, insert emoji
 - Open or save any attachment, copy message text, open links
 - Search every conversation and contact by name, and messages by their words
+- Folders in the chat list, for conversations you would rather see as one
+  row: daily reports from several numbers, sign-in codes, a project
 - New messages arrive live, with desktop notifications
 - One-time codes are picked out of messages, ready to copy
 - On [Omarchy](https://omarchy.org): a bar widget showing unread
@@ -384,16 +386,27 @@ that all send the same daily report, sign-in codes, a project) can be put
 in a folder. A folder is one row in the chat list, showing how many
 conversations are in it and how many are unread.
 
+![The chat list with a folder row marked by a triangle, and the folder chooser open over it](docs/folders.png)
+
 - **Put a conversation in one:** `f` on it in the chat list. Type to find
   a folder or to name a new one, and press Enter.
 - **Look inside:** Enter on the folder. The list shows its conversations;
   the first row, Left or Backspace goes back out.
 - **Take one out, or move it:** `f` on it again.
 
-A folder exists for as long as something is in it. Search still finds
-everything, and opening a conversation from search shows it in its folder.
-Folders are Fizz's own: Messages on your phone and Mac still lists those
-conversations separately.
+Good to know:
+
+- A folder sits in the list where its newest message puts it, and carries
+  the unread dot while anything in it is unread.
+- It exists for as long as something is in it: take the last conversation
+  out and the folder goes. To rename one, move its conversations to a
+  folder with the new name.
+- Search still finds everything, and opening a conversation from search
+  shows it in its folder.
+- New messages in a folder notify as usual.
+- Folders are Fizz's own, kept in its database on this computer. Messages
+  on your phone and Mac still lists those conversations separately, and
+  the bar widget lists them all too.
 
 ### Searching message text
 
@@ -726,7 +739,7 @@ comes back from the server the next time it is needed.
 | --- | --- |
 | Server address and password | `~/.config/fizz/env` |
 | Settings | `~/.config/fizz/config.toml` |
-| Database: read markers, the conversations kept for opening at once, and the text of all history if you turned on word search | `~/.local/share/fizz/fizz.db` |
+| Database: read markers, folders, the conversations kept for opening at once, and the text of all history if you turned on word search | `~/.local/share/fizz/fizz.db` |
 | The chat list and last few conversations, for instant startup | `~/.local/state/fizz/snapshot.json` |
 | Picture thumbnails, GIFs, opened files | `~/.cache/fizz/` |
 

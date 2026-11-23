@@ -78,8 +78,11 @@ update banner. Do this only when the owner asks for a release.
 - **Messages are private.** To look at the interface, use the demo, which
   has made-up conversations: `fizz --demo` to run it, or
   `fizz --snapshot 120x36` to print one frame as plain text (useful,
-  since you cannot drive a full-screen terminal app directly; add
-  `--search <words>` for the search layer). Do not
+  since you cannot drive a full-screen terminal app directly). Add
+  `--search <words>` for the search layer, or `--keys "j j f S Enter"`
+  to press keys first: each is one character or a key's name (Enter,
+  Esc, Tab, Up, Down, Left, Right, Backspace, Space). The demo starts in
+  the chat list, and nothing typed into it goes anywhere. Do not
   capture or print the user's real conversations.
 - **`fizz bridge` prints the user's messages.** It is what the bar widget
   reads: the recent conversations and their text, as JSON on standard
@@ -153,6 +156,10 @@ update banner. Do this only when the owner asks for a release.
   and link-preview data is only returned by `/message/query`.
 - Anything new that sends, deletes or edits must be testable in the demo
   without touching a server.
+- A folder's row in the chat list is a made-up `Chat` whose id begins
+  `folder:` (and `back:` for the row that leads out of one). They come
+  from `visible()` only and are never in `chats`; anything that acts on
+  the row under the cursor has to allow for one not being a conversation.
 - The bar widget draws only what `fizz bridge` prints. Change the format in
   `bridge.rs` and `contrib/omarchy-widget` together, and raise `VERSION`
   there when a field changes meaning. The Omarchy shell keeps running the
