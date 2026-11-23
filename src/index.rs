@@ -1,8 +1,14 @@
-//! Keeping message text on this computer so messages can be searched by
-//! what was said. The server cannot do this itself, so Fizz downloads the
-//! text once (newest first, in the background), keeps it up to date, and
-//! searches it in its own database (see `store.rs`). Nothing is stored
-//! unless the user turns this on.
+//! Keeping messages on this computer (in the database, see `store.rs`),
+//! for two things that are switched on separately:
+//!
+//!  - Conversations that open at once and can be read with the server out
+//!    of reach. For this Fizz keeps whole every message that arrives while
+//!    it is running, catches up on what arrived while it was not, and the
+//!    app adds each page of history it fetches. On unless `[startup]
+//!    remember` is turned off.
+//!  - Searching every message by what was said. The server cannot do that
+//!    itself, so the text of all of history is downloaded once, newest
+//!    first, in the background. Off until the user asks for it.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -23,6 +29,17 @@ pub use crate::store::{Hit, Mention};
 /// a time: big pages would make the app itself feel slow while this runs.
 const PAGE: usize = 300;
 const PAUSE: Duration = Duration::from_millis(450);
+
+/// When Fizz starts keeping whole messages, how far back it reaches for
+/// them, so the conversations in use lately open at once from then on.
+const RECENT: i64 = 7 * 24 * 3600 * 1000;
+/// Catching up starts this far before where the last run left off: a
+/// message can reach the Mac late, dated from when it was sent.
+const OVERLAP: i64 = 10 * 60 * 1000;
+/// Away for longer than this, Fizz does not download all it missed; it
+/// starts again from the recent past, and older history comes back a
+/// page at a time as conversations are opened.
+const LONGEST_GAP: i64 = 60 * 24 * 3600 * 1000;
 
 const ENABLED_KEY: &str = "search_text";
 const PROGRESS_KEY: &str = "search_progress";
@@ -61,7 +78,12 @@ pub fn enable() -> Result<()> {
     Ok(())
 }
 
-/// Remove the stored message text and turn the feature off.
+/// Whether whole messages are kept, for conversations that open at once.
+pub fn keeps_whole() -> bool {
+    crate::config::settings().startup.remember
+}
+
+/// Remove every stored message and turn word search off.
 pub fn delete() -> Result<()> {
     if store::path().exists() {
         let conn = store::open()?;
@@ -176,10 +198,27 @@ fn limits() -> (Option<i64>, Option<u64>) {
     (cutoff, cap)
 }
 
-/// Bring the stored text within the limits: drop what is older than the
-/// years allowed, then the oldest of the rest if it is still too big.
-/// Returns how many messages were removed.
+/// Bring what is stored within the limits, and note in `progress` that
+/// the download of history now stops where the limits put it. Returns how
+/// many messages were removed.
 pub fn trim(conn: &rusqlite::Connection, progress: &mut Progress) -> u64 {
+    let removed = trim_messages(conn);
+    if removed > 0 {
+        progress.limited = true;
+        progress.complete = true;
+        progress.stored = store::message_count(conn);
+        if let Some(oldest) = store::oldest_date(conn) {
+            progress.oldest = oldest;
+        }
+        progress.save(conn);
+    }
+    removed
+}
+
+/// Bring the stored messages within the limits: drop what is older than
+/// the years allowed, then the oldest of the rest if it is still too big.
+/// Returns how many were removed.
+fn trim_messages(conn: &rusqlite::Connection) -> u64 {
     let (cutoff, cap) = limits();
     let before = store::message_count(conn);
     let mut removed = 0;
@@ -211,15 +250,6 @@ pub fn trim(conn: &rusqlite::Connection, progress: &mut Progress) -> u64 {
             removed += gone;
             store::compact(conn);
         }
-    }
-    if removed > 0 {
-        progress.limited = true;
-        progress.complete = true;
-        progress.stored = store::message_count(conn);
-        if let Some(oldest) = store::oldest_date(conn) {
-            progress.oldest = oldest;
-        }
-        progress.save(conn);
     }
     removed
 }
@@ -253,14 +283,89 @@ fn still_wanted(conn: &rusqlite::Connection) -> bool {
     wanted
 }
 
-/// Keep the store complete: catch up on anything newer than what is held,
-/// follow history back to the beginning, and add messages as they arrive.
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// Store what has arrived live since last looked, without waiting for more.
+fn take_live(
+    conn: &mut rusqlite::Connection,
+    live: &mut UnboundedReceiver<Message>,
+    whole: bool,
+    progress: &mut Progress,
+) -> Result<()> {
+    let mut waiting = Vec::new();
+    while let Ok(message) = live.try_recv() {
+        waiting.push(message);
+    }
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    progress.stored += match whole {
+        true => store::keep(conn, &waiting)?,
+        false => store_page(conn, &waiting)?,
+    };
+    Ok(())
+}
+
+/// Take in, whole, everything that arrived while Fizz was not running, so
+/// that what is held runs on to the present without a hole.
+async fn catch_up(
+    api: &Api,
+    conn: &mut rusqlite::Connection,
+    live: &mut UnboundedReceiver<Message>,
+    progress: &mut Progress,
+) -> Result<()> {
+    let began = now_ms();
+    let mut after = match store::synced(conn) {
+        Some((_, to)) if began - to <= LONGEST_GAP => to - OVERLAP,
+        _ => {
+            // The first time, or after too long away: a new stretch.
+            store::start_sync(conn, began - RECENT)?;
+            began - RECENT
+        }
+    };
+    loop {
+        let asked = now_ms();
+        let page = api.arrived_after(after, PAGE).await?;
+        progress.stored += store::keep(conn, &page)?;
+        take_live(conn, live, true, progress)?;
+        match page.iter().map(|m| m.date_created).max() {
+            // A full page: there is more. Everything up to its newest is in.
+            Some(newest) if page.len() >= PAGE && newest > after => {
+                store::set_synced_to(conn, newest)?;
+                after = newest;
+                tokio::time::sleep(PAUSE / 3).await;
+            }
+            // The last of it: in step as of when this was asked for (or
+            // as of its newest, if the Mac's clock runs ahead of ours).
+            newest => {
+                store::set_synced_to(conn, asked.max(newest.unwrap_or(asked)))?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// `fizz index sync`: catch up once, without the app, and say how much
+/// was new.
+pub async fn sync_once(api: Api) -> Result<u64> {
+    let mut conn = store::open()?;
+    let (_nobody, mut live) = tokio::sync::mpsc::unbounded_channel();
+    let mut progress = Progress::default();
+    catch_up(&api, &mut conn, &mut live, &mut progress).await?;
+    Ok(progress.stored)
+}
+
+/// Keep the store in step with the server: catch up on what arrived while
+/// Fizz was not running, follow history back for word search if that is
+/// on, and add messages as they arrive.
 ///
 /// Returns `Ok` when there is nothing more to do: the pages asked for are
-/// in, the app has gone, or the index was turned off. An error (the server
-/// did not answer, the database was busy) leaves everything as it was, and
-/// calling this again carries on from there; `live` is borrowed so that
-/// what arrives in between is still waiting.
+/// in, the app has gone, or nothing is wanted kept any more. An error (the
+/// server did not answer, the database was busy) leaves everything as it
+/// was, and calling this again carries on from there; `live` is borrowed
+/// so that what arrives in between is still waiting.
 pub async fn run(
     api: Api,
     tx: UnboundedSender<AppEvent>,
@@ -281,24 +386,34 @@ pub async fn run(
     let mut conn = store::open()?;
     // Turned on before the database kept that fact (the old folder's
     // marker said so): record it, so there is one place to ask.
-    if store::state(&conn, ENABLED_KEY).is_none() {
+    if enabled() && store::state(&conn, ENABLED_KEY).is_none() {
         store::set_state(&conn, ENABLED_KEY, "1")?;
     }
-    if !still_wanted(&conn) {
+    let whole = keeps_whole();
+    // Word search: the text of all of history, when it has been asked for.
+    let mut text = still_wanted(&conn);
+    if !whole && !text {
         return Ok(());
     }
     let mut progress = Progress::load();
     let report = |p: &Progress| {
         let _ = tx.send(AppEvent::Indexing(p.clone()));
     };
-    report(&progress);
+    if text {
+        report(&progress);
+    }
     let mut pages = 0;
 
-    // Anything that arrived while Fizz was not running.
-    while progress.newest > 0 {
+    if whole && max_pages.is_none() {
+        catch_up(&api, &mut conn, live, &mut progress).await?;
+    }
+
+    // The text of anything that arrived while Fizz was not running.
+    while text && progress.newest > 0 {
         let page = api.history(None, Some(progress.newest), PAGE).await?;
         if !still_wanted(&conn) {
-            return Ok(());
+            text = false;
+            break;
         }
         let got = page.len();
         if let Some(latest) = page.iter().map(|m| m.date_created).max() {
@@ -312,86 +427,110 @@ pub async fn run(
         }
     }
 
-    // Apply the limits to what is already held.
-    trim(&conn, &mut progress);
-    let (cutoff, cap) = limits();
-    // If the download was held back by a limit that has since been
-    // loosened, there is older history to fetch again.
-    if progress.complete && progress.limited {
-        // A month of slack: text trimmed to the limit sits right at it,
-        // and must not be mistaken for a limit that has moved.
-        let month = 30 * 24 * 3600 * 1000;
-        let room_in_time = cutoff.is_none_or(|cutoff| progress.oldest > cutoff + month);
-        let room_on_disk = cap.is_none_or(|cap| store::size_on_disk() < cap / 10 * 8);
-        if room_in_time && room_on_disk {
-            progress.complete = false;
-            progress.limited = false;
-        }
-    }
-    report(&progress);
-
-    // Then history, newest first, so recent messages are searchable early,
-    // stopping at either limit.
-    while !progress.complete {
-        let far_enough = cutoff.is_some_and(|cutoff| progress.oldest > 0 && progress.oldest < cutoff);
-        let full = cap.is_some_and(|cap| pages % 10 == 0 && store::size_on_disk() >= cap);
-        if far_enough || full {
-            progress.complete = true;
-            progress.limited = true;
-            trim(&conn, &mut progress);
-            progress.save(&conn);
-            report(&progress);
-            break;
-        }
-        if max_pages.is_some_and(|max| pages >= max) {
-            break;
-        }
-        let before = (progress.oldest > 0).then_some(progress.oldest);
-        let (page, total) = api.history_with_total(before, PAGE).await?;
-        if !still_wanted(&conn) {
-            return Ok(());
-        }
-        pages += 1;
-        if progress.total.is_none() || before.is_none() {
-            progress.total = total;
-        }
-        if page.is_empty() {
-            progress.complete = true;
-        } else {
-            progress.scanned += page.len() as u64;
-            progress.stored += store_page(&mut conn, &page)?;
-            let oldest = page.iter().map(|m| m.date_created).min().unwrap_or(0);
-            let newest = page.iter().map(|m| m.date_created).max().unwrap_or(0);
-            progress.oldest = if progress.oldest == 0 { oldest } else { progress.oldest.min(oldest) };
-            progress.newest = progress.newest.max(newest);
-            if page.len() < PAGE {
-                progress.complete = true;
+    if text {
+        // Apply the limits to what is already held.
+        trim(&conn, &mut progress);
+        let (cutoff, cap) = limits();
+        // If the download was held back by a limit that has since been
+        // loosened, there is older history to fetch again.
+        if progress.complete && progress.limited {
+            // A month of slack: text trimmed to the limit sits right at it,
+            // and must not be mistaken for a limit that has moved.
+            let month = 30 * 24 * 3600 * 1000;
+            let room_in_time = cutoff.is_none_or(|cutoff| progress.oldest > cutoff + month);
+            let room_on_disk = cap.is_none_or(|cap| store::size_on_disk() < cap / 10 * 8);
+            if room_in_time && room_on_disk {
+                progress.complete = false;
+                progress.limited = false;
             }
         }
-        progress.save(&conn);
         report(&progress);
-        // Leave the server room to serve the app itself.
-        tokio::time::sleep(PAUSE).await;
+
+        // Then history, newest first, so recent messages are searchable
+        // early, stopping at either limit.
+        while !progress.complete {
+            let far_enough = cutoff.is_some_and(|cutoff| progress.oldest > 0 && progress.oldest < cutoff);
+            let full = cap.is_some_and(|cap| pages % 10 == 0 && store::size_on_disk() >= cap);
+            if far_enough || full {
+                progress.complete = true;
+                progress.limited = true;
+                trim(&conn, &mut progress);
+                progress.save(&conn);
+                report(&progress);
+                break;
+            }
+            if max_pages.is_some_and(|max| pages >= max) {
+                break;
+            }
+            let before = (progress.oldest > 0).then_some(progress.oldest);
+            let (page, total) = api.history_with_total(before, PAGE).await?;
+            if !still_wanted(&conn) {
+                text = false;
+                break;
+            }
+            pages += 1;
+            if progress.total.is_none() || before.is_none() {
+                progress.total = total;
+            }
+            if page.is_empty() {
+                progress.complete = true;
+            } else {
+                progress.scanned += page.len() as u64;
+                progress.stored += store_page(&mut conn, &page)?;
+                let oldest = page.iter().map(|m| m.date_created).min().unwrap_or(0);
+                let newest = page.iter().map(|m| m.date_created).max().unwrap_or(0);
+                progress.oldest = if progress.oldest == 0 { oldest } else { progress.oldest.min(oldest) };
+                progress.newest = progress.newest.max(newest);
+                if page.len() < PAGE {
+                    progress.complete = true;
+                }
+            }
+            // What arrives meanwhile is not left waiting for all of history.
+            take_live(&mut conn, live, whole, &mut progress)?;
+            progress.save(&conn);
+            report(&progress);
+            // Leave the server room to serve the app itself.
+            tokio::time::sleep(PAUSE).await;
+        }
+    } else if whole {
+        // Whole messages alone still answer to the limits. (Not through
+        // `trim`: there is no download of history for it to mark stopped.)
+        trim_messages(&conn);
     }
-    if max_pages.is_some() {
+    if max_pages.is_some() || (!whole && !text) {
         return Ok(());
     }
 
     // From here on, keep in step with what the app hears: new messages are
-    // added, an edited one has its text replaced, an unsent one is removed.
+    // added, an edited one is replaced, an unsent one is no longer found
+    // by what it said.
     while let Some(message) = live.recv().await {
-        if !still_wanted(&conn) {
-            return Ok(());
+        if text && !still_wanted(&conn) {
+            // Word search was turned off, and its text removed, elsewhere.
+            text = false;
+            if !whole {
+                return Ok(());
+            }
         }
-        if message.date_retracted.is_some() {
+        if whole {
+            if store::synced(&conn).is_none() {
+                // Emptied from outside: begin again from here.
+                store::start_sync(&conn, now_ms())?;
+            }
+            progress.stored += store::keep(&mut conn, std::slice::from_ref(&message))?;
+            store::set_synced_to(&conn, message.date_created)?;
+        } else if message.date_retracted.is_some() {
             store::remove(&conn, &message.guid);
             continue;
+        } else {
+            progress.stored += store_page(&mut conn, std::slice::from_ref(&message))?;
         }
-        progress.stored += store_page(&mut conn, std::slice::from_ref(&message))?;
-        if message.date_created > progress.newest {
-            progress.newest = message.date_created;
+        if text {
+            if message.date_created > progress.newest {
+                progress.newest = message.date_created;
+            }
+            progress.save(&conn);
         }
-        progress.save(&conn);
     }
     Ok(())
 }

@@ -398,6 +398,22 @@ impl Api {
         .await
     }
 
+    /// Every chat's messages created after `since`, oldest first, whole:
+    /// as a conversation's own page gives them, and saying which chat each
+    /// is in. For catching up on what arrived while Fizz was not running.
+    pub async fn arrived_after(&self, since: i64, limit: usize) -> Result<Vec<Message>> {
+        self.post(
+            "/message/query",
+            json!({
+                "limit": limit,
+                "after": since,
+                "with": ["chat", "attachment", "handle", "payloadData"],
+                "sort": "ASC",
+            }),
+        )
+        .await
+    }
+
     /// Send text. With `reply_to` (a message id and which part of it), it
     /// goes as an inline reply, which only the Private API can do.
     pub async fn send_text(

@@ -344,23 +344,27 @@ check = true
 every_hours = 6
 
 [startup]
-# Open showing the chat list and conversations from last time straight
-# away, then catch up with the server behind them. This keeps the last few
-# conversations you opened (about 60 messages each) on this computer. When
-# false, Fizz waits for the server before showing anything.
+# Keep conversations on this computer, so that Fizz opens showing what was
+# there last time, any conversation opens at once, and what you have seen
+# can be read when the server is out of reach. Kept: messages that arrive
+# while Fizz is open or arrived since it last was, and each page of
+# history you scroll to. When false, nothing of your conversations is
+# kept and Fizz waits for the server before showing anything.
 remember = true
 
 [search]
-# Searching messages by their words keeps a copy of message text on this
-# computer (it is off until you turn it on in the search screen with
-# Ctrl+B). It is small: roughly 14 MB for every 100,000 messages.
-# See what it is using with: fizz storage    Remove it: fizz index delete
+# Searching messages by their words downloads the text of all your
+# history to this computer (it is off until you turn it on in the search
+# screen with Ctrl+B). It is small: roughly 14 MB for every 100,000
+# messages. See what is stored with: fizz storage    Remove it: fizz index delete
 #
-# Keep only this many years of it; older text is removed as it ages out.
+# These two limits apply to every message Fizz stores, the conversations
+# kept under [startup] included.
+# Keep only this many years; older messages are removed as they age out.
 # 0 keeps everything.
 years = 0
-# And never let it take more than this many megabytes; the oldest text
-# goes first. 0 is no limit.
+# And never let them take more than this many megabytes; the oldest go
+# first. 0 is no limit.
 max_mb = 0
 
 [codes]

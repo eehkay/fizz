@@ -201,11 +201,26 @@ away, with "connecting" in the bottom corner, and brings them up to date
 as the server answers (usually well under a second). If the server cannot
 be reached you still see what was there, marked offline.
 
-To do that it keeps the chat list and the last few conversations you
-opened (about 60 messages each) in `~/.local/state/fizz/snapshot.json`,
-readable only by you. Set `remember = false` under `[startup]` to turn this
-off and remove the file; Fizz then waits for the server before showing
-anything.
+Conversations open the same way. Fizz keeps the messages it has seen in
+its database on this computer, shows a conversation from there the moment
+you open it, and then lets the server's copy correct anything that has
+changed. With the server out of reach, what is kept can still be read.
+
+What is kept:
+
+- every message that arrives while Fizz is open, and on starting, the ones
+  that arrived since it last was (reaching back a week the first time);
+- each page of older history you scroll to.
+
+Fizz only shows a stretch of a conversation from the database when it knows
+nothing is missing inside it; anything else it asks the server for, as
+before. A message edited, unsent or deleted on another device while Fizz
+was closed is put right when that part of the conversation is next on
+screen with the server reachable.
+
+All of this is readable only by you. Set `remember = false` under
+`[startup]` to turn it off: the kept conversations and the last-session
+file are removed, and Fizz waits for the server before showing anything.
 
 ## Stats
 
@@ -253,7 +268,7 @@ fizz check     # test the connection without opening the app
 fizz config    # open the settings file in your $EDITOR
 fizz update    # install the newest version (--check only looks)
 fizz storage   # what Fizz keeps on disk, against each store's limit
-fizz index     # the message-text search index ("fizz index delete" removes it)
+fizz index     # the messages stored for search and for opening at once ("fizz index delete" removes them)
 fizz widget    # put Fizz in the Omarchy bar ("install", or "remove")
 fizz --demo    # made-up conversations, no server needed
 fizz --help    # this list, and the environment variables
@@ -363,9 +378,9 @@ Pressing `/` again brings back your last search; `Ctrl+U` clears it.
 
 ### Searching message text
 
-The server cannot search by words itself, so this part works from a copy of
-your message text kept on this computer. It is off until you press `Ctrl+B`
-in the search layer.
+The server cannot search by words itself, so this part works from the text
+of your whole history, downloaded to this computer. It is off until you
+press `Ctrl+B` in the search layer.
 
 - **What it stores:** the text of each message, who sent it and when, in
   Fizz's database (`~/.local/share/fizz/fizz.db`), readable only by you.
@@ -672,15 +687,16 @@ while it is open.
 
 | Store | What it is | Limits | Defaults |
 | --- | --- | --- | --- |
-| Search text | Message text, if you turned on word search | `years` and `max_mb` under `[search]` | everything, no size limit |
+| Messages | The conversations Fizz keeps, and the text of all history if you turned on word search | `years` and `max_mb` under `[search]` | everything, no size limit |
 | Pictures | A small copy of each picture you scroll past, and GIFs | `picture_cache_mb` under `[media]` | 150 MB; unused for 90 days |
 | Files | Things you open or save, and videos fetched for a still | `file_cache_mb` and `file_cache_days` under `[media]` | 250 MB; unused for 14 days |
 
-Search text is small, roughly 14 MB for every 100,000 messages, so it is
-unlimited unless you say otherwise. With `years` set, older text is
-removed as it ages out; with `max_mb` set, the oldest goes first. The
-search screen shows how far back it reaches. Loosening a limit later lets
-the download of older history carry on from where it stopped.
+Messages are small: roughly 14 MB for every 100,000 as text for search,
+and about 120 bytes more for each one kept whole. So they are unlimited
+unless you say otherwise. With `years` set, older messages are removed as
+they age out; with `max_mb` set, the oldest go first. The search screen
+shows how far back word search reaches. Loosening a limit later lets the
+download of older history carry on from where it stopped.
 
 The caches hold nothing that cannot be fetched again: anything trimmed
 comes back from the server the next time it is needed.
@@ -691,8 +707,8 @@ comes back from the server the next time it is needed.
 | --- | --- |
 | Server address and password | `~/.config/fizz/env` |
 | Settings | `~/.config/fizz/config.toml` |
-| Database: read markers, and message text if you turned on word search | `~/.local/share/fizz/fizz.db` |
-| The last session, for instant startup | `~/.local/state/fizz/snapshot.json` |
+| Database: read markers, the conversations kept for opening at once, and the text of all history if you turned on word search | `~/.local/share/fizz/fizz.db` |
+| The chat list and last few conversations, for instant startup | `~/.local/state/fizz/snapshot.json` |
 | Picture thumbnails, GIFs, opened files | `~/.cache/fizz/` |
 
 The database is ordinary SQLite, unencrypted and readable only by you,

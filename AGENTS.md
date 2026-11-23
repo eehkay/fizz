@@ -88,7 +88,8 @@ update banner. Do this only when the owner asks for a release.
   use `fizz widget install --demo`, and do not screenshot the panel while it
   shows real conversations.
 - **The database is the user's messages.** `~/.local/share/fizz/fizz.db`
-  holds the text of their messages once they turn word search on. Do not
+  holds the conversations Fizz has shown them, and the text of all their
+  history once they turn word search on. Do not
   read, print or copy it, and do not open it with `sqlite3` to look
   around. `fizz storage`, `fizz index` and `fizz index count <words>`
   report sizes and counts without showing any text.
@@ -123,8 +124,11 @@ update banner. Do this only when the owner asks for a release.
     shown as dots), tests them and saves them
   - `theme.rs`: colours, including following the Omarchy theme
   - `codes.rs`: spotting one-time codes in message text
-  - `store.rs`: the SQLite database (tables, search, read markers)
-  - `index.rs`: downloading message text into it and keeping it current
+  - `store.rs`: the SQLite database (tables, whole messages and which
+    stretches of each conversation are held complete, search, read
+    markers)
+  - `index.rs`: keeping it in step with the server (catching up, live
+    messages, and the download of all history for word search)
   - `storage.rs`: keeping the caches within their limits, and the
     storage report
   - `metrics.rs`: timings and usage for the stats screen
@@ -134,6 +138,13 @@ update banner. Do this only when the owner asks for a release.
   - `demo.rs`: the made-up data
 - Startup paints from the snapshot first and refreshes behind it, so
   anything shown at launch may be a run old until the server answers.
+- A conversation is shown from the database first and confirmed by the
+  server (`fetch_messages` in `app.rs`). The database only answers for a
+  stretch it holds with nothing missing (`covered` in `store.rs`); keep
+  that true when adding a way for messages to get in or out, or history
+  will be shown with holes in it. To try a change against real data
+  without touching it, run Fizz with `XDG_DATA_HOME`, `XDG_STATE_HOME`
+  and `XDG_CACHE_HOME` pointed at a scratch folder holding a copy.
 - Server behaviours worth knowing before changing how data is fetched:
   the chat list is built from the newest messages (`/message/query`)
   because the server's own "chats by last message" ordering proved wrong;

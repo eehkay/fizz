@@ -106,6 +106,8 @@ pub enum AppEvent {
         chat: String,
         page: Page,
         result: Result<Vec<Message>, String>,
+        /// What putting the page in the database found out, when it was.
+        stored: Option<crate::store::Stored>,
     },
     Incoming(Vec<Message>),
     Online(bool),
@@ -199,6 +201,9 @@ pub struct Convo {
     pub last_total: usize,
     pub loaded: bool,
     pub error: Option<String>,
+    /// After the server failed to give a page: when to ask again. Until
+    /// then the top of the conversation being in view asks for nothing.
+    retry_after: Option<Instant>,
     /// Rows scrolled up from the newest message.
     pub scroll: usize,
 }
@@ -463,6 +468,33 @@ pub struct App {
     temp_counter: u64,
 }
 
+/// Put a page from the server in the database, off the async threads.
+/// `None` when that could not be done; the page is still shown.
+async fn keep_page(
+    chat: String,
+    page: Vec<Message>,
+    shape: crate::store::Shape,
+    asked: i64,
+) -> Option<crate::store::Stored> {
+    tokio::task::spawn_blocking(move || {
+        let mut conn = crate::store::open().ok()?;
+        let stored = crate::store::keep_page(&mut conn, &chat, &page, shape, asked)
+            .map_err(|e| crate::config::log(&format!("couldn't keep a page of messages: {e:#}")))
+            .ok()?;
+        if !stored.gone.is_empty() {
+            crate::config::log(&format!(
+                "a page of {} showed {} kept messages to have gone",
+                page.len(),
+                stored.gone.len()
+            ));
+        }
+        Some(stored)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 impl App {
     pub fn new(api: Option<Api>, tx: UnboundedSender<AppEvent>, picker: Picker) -> Self {
         App {
@@ -603,12 +635,24 @@ impl App {
     }
 
     pub fn start(&mut self) {
+        // The database first: opening a conversation reads from it.
+        self.open_store();
+        if !crate::index::keeps_whole()
+            && let Some(conn) = &self.store
+            && crate::store::whole_count(conn) > 0
+        {
+            // Turned off since last time: what was kept goes.
+            if let Err(e) = crate::store::forget_whole(conn, crate::index::enabled()) {
+                crate::config::log(&format!("couldn't remove the kept conversations: {e:#}"));
+            }
+        }
         self.restore();
         if crate::index::enabled() {
             self.indexing = Some(crate::index::Progress::load());
+        }
+        if crate::index::enabled() || crate::index::keeps_whole() {
             self.start_index();
         }
-        self.open_store();
         if let Some(api) = self.api.clone() {
             let tx = self.tx.clone();
             tokio::spawn(async move {
@@ -1075,7 +1119,7 @@ impl App {
                     wait = FIRST_WAIT;
                 }
                 crate::config::log(&format!(
-                    "search index paused: {e:#}; trying again in {} s",
+                    "keeping messages in step paused: {e:#}; trying again in {} s",
                     wait.as_secs()
                 ));
                 tokio::time::sleep(wait).await;
@@ -1091,6 +1135,9 @@ impl App {
         }
         match crate::index::enable() {
             Ok(()) => {
+                // Whatever is running began without it: let that one end
+                // (it does when this channel closes) and start afresh.
+                self.index_tx = None;
                 self.start_index();
                 self.set_status("Downloading message text in the background…".into());
             }
@@ -1304,52 +1351,111 @@ impl App {
         }
         convo.scroll = 0;
         if !convo.loaded && !convo.loading {
+            // Opening it is asking again, whatever went wrong before.
+            convo.retry_after = None;
             self.fetch_messages(guid);
         }
         self.request_images();
     }
 
-    fn fetch_messages(&mut self, guid: &str) {
+    /// Whether whole messages are kept in the database, and it is there.
+    fn keeps_whole(&self) -> bool {
+        self.store.is_some() && crate::index::keeps_whole()
+    }
+
+    /// Ask the server for one page of a conversation and, when whole
+    /// messages are kept, put it in the database before reporting it.
+    fn fetch_page(
+        &self,
+        guid: &str,
+        page: Page,
+        before: Option<i64>,
+        after: Option<i64>,
+        shape: crate::store::Shape,
+    ) {
         let Some(api) = self.api.clone() else { return };
-        let convo = self.convos.entry(guid.to_string()).or_default();
-        if convo.loading || convo.exhausted {
+        let (chat, tx, keep) = (guid.to_string(), self.tx.clone(), self.keeps_whole());
+        tokio::spawn(async move {
+            let asked = chrono::Utc::now().timestamp_millis();
+            let result = api
+                .messages(&chat, before, after, MESSAGE_PAGE)
+                .await
+                .map_err(|e| e.to_string());
+            let stored = match (&result, keep) {
+                (Ok(messages), true) => keep_page(chat.clone(), messages.clone(), shape, asked).await,
+                _ => None,
+            };
+            let _ = tx.send(AppEvent::Messages {
+                chat,
+                page,
+                result,
+                stored,
+            });
+        });
+    }
+
+    /// Load the next page of a conversation going back (or its newest, if
+    /// nothing is loaded): from the database at once where that part is
+    /// held whole, and from the server, which has the last word.
+    fn fetch_messages(&mut self, guid: &str) {
+        if self.api.is_none() {
             return;
         }
-        convo.loading = true;
+        let keep = self.keeps_whole();
+        let offline = self.online == Some(false);
+        let convo = self.convos.entry(guid.to_string()).or_default();
+        if convo.loading || convo.exhausted || convo.retry_after.is_some_and(|at| at > Instant::now()) {
+            return;
+        }
         convo.error = None;
         // One past the oldest we hold, so nothing sharing its timestamp is
         // skipped; anything fetched twice is simply recognised.
         let before = convo.messages.first().map(|m| m.date_created + 1);
-        let (chat, tx) = (guid.to_string(), self.tx.clone());
-        tokio::spawn(async move {
-            let result = api
-                .messages(&chat, before, None, MESSAGE_PAGE)
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::Messages {
-                chat,
-                page: Page::Older,
-                result,
-            });
-        });
+        // What is held here comes first. A whole page of it can be shown,
+        // and scrolled on from, without waiting for the server.
+        let mut shown = false;
+        let mut whole_page = false;
+        if keep && let Some(conn) = &self.store {
+            let local = crate::store::page(conn, guid, before, MESSAGE_PAGE);
+            if !local.messages.is_empty() {
+                shown = true;
+                whole_page = local.complete;
+                convo.loaded = true;
+                convo.exhausted |= local.reaches_start;
+                for message in local.messages {
+                    convo.absorb(message);
+                }
+                convo.settle();
+            }
+        }
+        if whole_page && offline {
+            // Nothing to ask: this is all there is to know for now.
+            return self.request_images();
+        }
+        convo.loading = !whole_page;
+        let (page, shape) = match before {
+            // The newest page, confirming what was just shown from here.
+            None if shown => (Page::Latest, crate::store::Shape::Latest { limit: MESSAGE_PAGE }),
+            None => (Page::Older, crate::store::Shape::Latest { limit: MESSAGE_PAGE }),
+            Some(before) => (
+                Page::Older,
+                crate::store::Shape::Older {
+                    before,
+                    limit: MESSAGE_PAGE,
+                },
+            ),
+        };
+        self.fetch_page(guid, page, before, None, shape);
+        if shown {
+            self.request_images();
+        }
     }
 
     /// Fetch a conversation's newest page to bring a remembered copy up to
     /// date, without disturbing what is on screen in the meantime.
     fn refresh_latest(&mut self, guid: &str) {
-        let Some(api) = self.api.clone() else { return };
-        let (chat, tx) = (guid.to_string(), self.tx.clone());
-        tokio::spawn(async move {
-            let result = api
-                .messages(&chat, None, None, MESSAGE_PAGE)
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::Messages {
-                chat,
-                page: Page::Latest,
-                result,
-            });
-        });
+        let shape = crate::store::Shape::Latest { limit: MESSAGE_PAGE };
+        self.fetch_page(guid, Page::Latest, None, None, shape);
     }
 
     fn snapshot_path() -> PathBuf {
@@ -1452,7 +1558,9 @@ impl App {
 
     /// When the view is away from the present: fetch the next newer page.
     fn fetch_newer(&mut self, guid: &str) {
-        let Some(api) = self.api.clone() else { return };
+        if self.api.is_none() {
+            return;
+        }
         let Some(convo) = self.convos.get_mut(guid) else {
             return;
         };
@@ -1463,18 +1571,7 @@ impl App {
             return;
         };
         convo.loading_newer = true;
-        let (chat, tx) = (guid.to_string(), self.tx.clone());
-        tokio::spawn(async move {
-            let result = api
-                .messages(&chat, None, Some(after), MESSAGE_PAGE)
-                .await
-                .map_err(|e| e.to_string());
-            let _ = tx.send(AppEvent::Messages {
-                chat,
-                page: Page::Newer,
-                result,
-            });
-        });
+        self.fetch_page(guid, Page::Newer, None, Some(after), crate::store::Shape::Loose);
     }
 
     /// Open a conversation at one message from its past, loading the
@@ -1502,9 +1599,10 @@ impl App {
         }
         self.jump_target = Some(message.to_string());
         let Some(api) = self.api.clone() else { return };
-        let (chat, tx) = (chat.to_string(), self.tx.clone());
+        let (chat, tx, keep) = (chat.to_string(), self.tx.clone(), self.keeps_whole());
         tokio::spawn(async move {
             const SIDE: usize = 30;
+            let asked = chrono::Utc::now().timestamp_millis();
             let older = api.messages(&chat, Some(date + 1), None, SIDE);
             let newer = api.messages(&chat, None, Some(date), SIDE);
             let result = match tokio::join!(older, newer) {
@@ -1519,7 +1617,20 @@ impl App {
                 Ok((messages, more_newer)) => (Page::Around { more_newer }, Ok(messages)),
                 Err(e) => (Page::Around { more_newer: false }, Err(e)),
             };
-            let _ = tx.send(AppEvent::Messages { chat, page, result });
+            // Kept, though a stretch from the middle of a conversation
+            // says nothing about what lies either side of it.
+            let stored = match (&result, keep) {
+                (Ok(messages), true) => {
+                    keep_page(chat.clone(), messages.clone(), crate::store::Shape::Loose, asked).await
+                }
+                _ => None,
+            };
+            let _ = tx.send(AppEvent::Messages {
+                chat,
+                page,
+                result,
+                stored,
+            });
         });
     }
 
@@ -2718,6 +2829,7 @@ impl App {
                     self.seen.remove(&chat);
                     if let Some(conn) = &self.store {
                         crate::store::forget_seen(conn, &chat);
+                        crate::store::forget_chat(conn, &chat);
                     }
                     self.set_status("Conversation deleted".into());
                 }
@@ -2871,7 +2983,12 @@ impl App {
                 }
                 self.people.sort_by_key(|(name, _)| name.to_lowercase());
             }
-            AppEvent::Messages { chat, page, result } => {
+            AppEvent::Messages {
+                chat,
+                page,
+                result,
+                stored,
+            } => {
                 let convo = self.convos.entry(chat.clone()).or_default();
                 match page {
                     Page::Newer => convo.loading_newer = false,
@@ -2880,6 +2997,7 @@ impl App {
                 match result {
                     Ok(messages) => {
                         convo.loaded = true;
+                        convo.retry_after = None;
                         match page {
                             Page::Older => {
                                 if messages.len() < MESSAGE_PAGE {
@@ -2895,21 +3013,53 @@ impl App {
                             }
                             Page::Around { more_newer } => convo.detached = more_newer,
                             Page::Latest => {
-                                // If what we remembered does not reach as far
-                                // as this page, there is a gap of messages we
-                                // never saw between them: start again from
-                                // the page rather than show history with a
-                                // hole in it.
-                                let joins = convo.messages.is_empty()
-                                    || messages
-                                        .iter()
-                                        .any(|m| convo.messages.iter().any(|c| c.guid == m.guid));
-                                if !joins {
-                                    convo.messages.retain(|m| m.pending);
-                                    convo.reaction_events.clear();
-                                    convo.exhausted = messages.len() < MESSAGE_PAGE;
+                                // If what was on screen does not reach as
+                                // far as this page, there is a gap of
+                                // messages we never saw between them: start
+                                // again from the page rather than show
+                                // history with a hole in it. The database
+                                // knows how far what it holds reaches;
+                                // without it, go by whether the two share
+                                // a message.
+                                let joins = match &stored {
+                                    Some(stored) if stored.vouched => stored.joined,
+                                    _ => {
+                                        convo.messages.is_empty()
+                                            || messages
+                                                .iter()
+                                                .any(|m| convo.messages.iter().any(|c| c.guid == m.guid))
+                                    }
+                                };
+                                let whole = messages.len() < MESSAGE_PAGE;
+                                if !joins || whole {
+                                    // Only what the page reaches back to
+                                    // is known to run on unbroken.
+                                    let from = match whole {
+                                        true => i64::MIN,
+                                        false => messages.iter().map(|m| m.date_created).min().unwrap_or(i64::MIN),
+                                    };
+                                    let in_page: HashSet<&str> = messages.iter().map(|m| m.guid.as_str()).collect();
+                                    let stays = |m: &Message| {
+                                        m.pending
+                                            || m.failed.is_some()
+                                            || in_page.contains(m.guid.as_str())
+                                            || (!whole && m.date_created >= from)
+                                            // Too new for the page to have had it.
+                                            || m.date_created > chrono::Utc::now().timestamp_millis() - 60_000
+                                    };
+                                    convo.messages.retain(stays);
+                                    convo.reaction_events.retain(stays);
+                                    convo.exhausted = whole;
                                 }
                             }
+                        }
+                        // What the page showed to have been deleted since.
+                        if let Some(stored) = &stored
+                            && !stored.gone.is_empty()
+                        {
+                            let gone = |m: &Message| stored.gone.iter().any(|g| *g == m.guid);
+                            convo.messages.retain(|m| !gone(m));
+                            convo.reaction_events.retain(|m| !gone(m));
                         }
                         for message in messages {
                             convo.absorb(message);
@@ -2924,7 +3074,12 @@ impl App {
                             entry.last_message = Some(newest);
                         }
                     }
-                    Err(e) => convo.error = Some(e),
+                    Err(e) => {
+                        // Shown only when there is nothing else to show: a
+                        // conversation read from the database stays up.
+                        convo.error = Some(e);
+                        convo.retry_after = Some(Instant::now() + Duration::from_secs(10));
+                    }
                 }
                 if self.open.as_deref() == Some(chat.as_str()) {
                     self.request_images();
@@ -4038,4 +4193,133 @@ mod tests {
         assert!(app.mention_hits().is_empty());
         assert_eq!(app.search_rows(), app.conversation_hits().len() + 1);
     }
+    // ----- pages from the database and the server ------------------------
+
+    /// A message of ours from `days` ago, as the server reports it.
+    fn old(guid: &str, days: i64) -> Message {
+        Message {
+            guid: guid.into(),
+            text: Some(format!("message {guid}")),
+            date_created: chrono::Utc::now().timestamp_millis() - days * 24 * 3600 * 1000,
+            is_from_me: true,
+            ..Message::default()
+        }
+    }
+
+    /// A conversation showing these, as read from the database on opening.
+    fn showing(app: &mut App, messages: Vec<Message>) {
+        let mut convo = Convo {
+            loaded: true,
+            ..Convo::default()
+        };
+        for message in messages {
+            convo.absorb(message);
+        }
+        convo.settle();
+        app.convos.insert("chat".into(), convo);
+    }
+
+    fn latest(app: &mut App, page: Vec<Message>, stored: crate::store::Stored) {
+        app.on_event(AppEvent::Messages {
+            chat: "chat".into(),
+            page: Page::Latest,
+            result: Ok(page),
+            stored: Some(stored),
+        });
+    }
+
+    fn shown(app: &App) -> Vec<&str> {
+        app.convos["chat"].messages.iter().map(|m| m.guid.as_str()).collect()
+    }
+
+    /// A page as full as pages come, ending (oldest) `oldest_days` ago.
+    fn full_page(oldest_days: i64) -> Vec<Message> {
+        (0..MESSAGE_PAGE as i64)
+            .map(|i| {
+                let mut m = old(&format!("p{i}"), oldest_days);
+                m.date_created += i * 1000;
+                m
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_servers_page_joins_what_was_shown_from_the_database() {
+        let mut app = demo();
+        showing(&mut app, vec![old("a", 9), old("b", 8), old("p0", 3)]);
+        let stored = crate::store::Stored {
+            vouched: true,
+            joined: true,
+            ..Default::default()
+        };
+        latest(&mut app, full_page(3), stored);
+        let shown = shown(&app);
+        assert_eq!(&shown[..3], ["a", "b", "p0"], "older history stays, in order");
+        assert_eq!(shown.len(), 2 + MESSAGE_PAGE);
+        assert!(!app.convos["chat"].exhausted);
+    }
+
+    #[test]
+    fn history_beyond_a_hole_is_not_left_on_screen() {
+        let mut app = demo();
+        let mut sending = old("temp", 0);
+        sending.pending = true;
+        showing(&mut app, vec![old("a", 40), old("b", 39), sending]);
+        // The newest page reaches back three days; the database says that
+        // does not meet what it held.
+        let stored = crate::store::Stored {
+            vouched: true,
+            ..Default::default()
+        };
+        latest(&mut app, full_page(3), stored);
+        let shown = shown(&app);
+        assert!(!shown.contains(&"a") && !shown.contains(&"b"));
+        assert!(shown.contains(&"temp"), "a message still being sent is not history");
+        assert_eq!(shown.len(), MESSAGE_PAGE + 1);
+    }
+
+    #[test]
+    fn without_the_databases_word_a_shared_message_is_what_joins() {
+        let mut app = demo();
+        showing(&mut app, vec![old("a", 9), old("p0", 3)]);
+        // Kept, but not vouched for (a conversation under two names).
+        latest(&mut app, full_page(3), crate::store::Stored::default());
+        assert_eq!(shown(&app)[0], "a", "they share a message, so the older one stays");
+        showing(&mut app, vec![old("a", 9), old("b", 8)]);
+        latest(&mut app, full_page(3), crate::store::Stored::default());
+        assert!(!shown(&app).contains(&"a"), "nothing shared: there is a hole");
+    }
+
+    #[test]
+    fn a_message_deleted_elsewhere_leaves_the_screen() {
+        let mut app = demo();
+        showing(&mut app, vec![old("a", 5), old("b", 4), old("c", 3)]);
+        let stored = crate::store::Stored {
+            vouched: true,
+            joined: true,
+            gone: vec!["b".into()],
+            ..Default::default()
+        };
+        // A short page: this is the whole conversation.
+        latest(&mut app, vec![old("c", 3), old("a", 5)], stored);
+        assert_eq!(shown(&app), ["a", "c"]);
+        assert!(app.convos["chat"].exhausted);
+    }
+
+    #[test]
+    fn a_server_out_of_reach_leaves_the_conversation_up() {
+        let mut app = demo();
+        showing(&mut app, vec![old("a", 5), old("b", 4)]);
+        app.on_event(AppEvent::Messages {
+            chat: "chat".into(),
+            page: Page::Latest,
+            result: Err(crate::api::UNREACHABLE.into()),
+            stored: None,
+        });
+        let convo = &app.convos["chat"];
+        assert!(convo.loaded && !convo.loading);
+        assert_eq!(shown(&app), ["a", "b"]);
+        assert!(convo.retry_after.is_some(), "and it is not asked for again at once");
+    }
+
 }

@@ -52,8 +52,9 @@ Usage:
   fizz config     Open the settings file in your editor
   fizz update     Install the newest version (--check only looks)
   fizz storage    Show what Fizz keeps on disk and each store's limit
-  fizz index      Show the message-text search index (add: delete, to
-                  remove it and turn it off)
+  fizz index      Show what messages are stored for word search and for
+                  opening conversations at once (add: delete, to remove
+                  them all and turn word search off)
   fizz sound      Play the notification sound
   fizz widget     Put Fizz in the Omarchy bar (install, or remove)
   fizz --demo     Try the interface with made-up conversations
@@ -258,7 +259,25 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
     let is = |name: &str| action.is_some_and(|(_, word)| word == name);
     if is("delete") {
         index::delete()?;
-        println!("The search index has been removed and turned off.");
+        println!("Every stored message has been removed, and word search turned off.");
+        if index::keeps_whole() {
+            println!(
+                "Conversations are kept again as you use Fizz, so they open at once. To stop\n\
+                 that too, set remember = false under [startup] in the settings (fizz config)."
+            );
+        }
+        return Ok(());
+    }
+    if is("sync") {
+        // Take in what arrived while Fizz was not running, and stop.
+        if !index::keeps_whole() {
+            println!("Conversations are not being kept (remember = false under [startup]).");
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let added = index::sync_once(Api::new(config)?).await?;
+        println!("Caught up in {:.1} s: {added} new messages.", started.elapsed().as_secs_f64());
+        println!("{}", kept_whole());
         return Ok(());
     }
     if is("build") {
@@ -326,8 +345,9 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
         return Ok(());
     }
     if !index::enabled() {
-        println!("Message text is not being stored, so only names can be searched.");
+        println!("Word search is off, so only names can be searched.");
         println!("Turn it on inside Fizz: press / to search, then Ctrl+B.");
+        println!("\n{}", kept_whole());
         return Ok(());
     }
     let p = index::Progress::load();
@@ -349,8 +369,29 @@ async fn index_command(args: &[String], config: &Config) -> Result<()> {
     if index::old_dir().join("messages.tsv").exists() {
         println!("          (an older text index is still present and will be brought across)");
     }
-    println!("\nRemove it and turn it off with: fizz index delete");
+    println!("\n{}", kept_whole());
+    println!("\nRemove every stored message, and turn word search off, with: fizz index delete");
     Ok(())
+}
+
+/// One line on the messages kept whole, which conversations open from.
+fn kept_whole() -> String {
+    if !index::keeps_whole() {
+        return "Conversations are not kept on this computer (remember = false under [startup]).".into();
+    }
+    let Ok(conn) = store::open() else {
+        return "Conversations: the database could not be opened.".into();
+    };
+    let whole = store::whole_count(&conn);
+    match store::synced(&conn) {
+        Some((since, _)) => format!(
+            "Conversations: {whole} messages kept whole, and everything that has arrived since {}.",
+            chrono::DateTime::from_timestamp_millis(since)
+                .map(|d| d.with_timezone(&chrono::Local).format("%b %-d, %Y").to_string())
+                .unwrap_or_default()
+        ),
+        None => format!("Conversations: {whole} messages kept whole."),
+    }
 }
 
 /// What this terminal can do with pictures, in a sentence.

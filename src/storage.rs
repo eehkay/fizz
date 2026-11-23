@@ -205,7 +205,7 @@ pub fn report() -> Vec<Line> {
         .map_or(0, |conn| crate::store::message_count(&conn));
     vec![
         Line {
-            name: "Search text",
+            name: "Messages",
             bytes: crate::store::size_on_disk(),
             items: database_rows,
             limit: match (s.search.years, s.search.max_mb) {
