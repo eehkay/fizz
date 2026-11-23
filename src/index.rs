@@ -41,6 +41,10 @@ const OVERLAP: i64 = 10 * 60 * 1000;
 /// page at a time as conversations are opened.
 const LONGEST_GAP: i64 = 60 * 24 * 3600 * 1000;
 
+/// How often, while running, the server is asked for everything since the
+/// store was last known to be in step.
+const IN_STEP_EVERY: Duration = Duration::from_secs(120);
+
 const ENABLED_KEY: &str = "search_text";
 const PROGRESS_KEY: &str = "search_progress";
 
@@ -96,6 +100,9 @@ pub fn delete() -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).context("couldn't remove the old search index"),
     }
+    // The last session's conversations are messages too. (A Fizz that is
+    // running writes this again; it is gone for good with `remember` off.)
+    let _ = std::fs::remove_file(crate::config::state_dir().join("snapshot.json"));
     ENABLED.store(1, Ordering::Relaxed);
     Ok(())
 }
@@ -143,6 +150,21 @@ impl Progress {
     fn save(&self, conn: &rusqlite::Connection) {
         if let Ok(json) = serde_json::to_string(self) {
             let _ = store::set_state(conn, PROGRESS_KEY, &json);
+        }
+    }
+
+    /// Messages were removed to fit the limits, and the oldest left is
+    /// from `oldest_left`. If that cut into what the download of history
+    /// had fetched, the download ends there, held by a limit. If it did
+    /// not (what went was older than the download has reached: whole
+    /// messages kept from a conversation opened far back), the download
+    /// is where it was, and must not be told it got further than it did.
+    fn cut_at(&mut self, oldest_left: Option<i64>) {
+        let Some(oldest_left) = oldest_left else { return };
+        if self.oldest > 0 && oldest_left > self.oldest {
+            self.oldest = oldest_left;
+            self.complete = true;
+            self.limited = true;
         }
     }
 
@@ -204,12 +226,8 @@ fn limits() -> (Option<i64>, Option<u64>) {
 pub fn trim(conn: &rusqlite::Connection, progress: &mut Progress) -> u64 {
     let removed = trim_messages(conn);
     if removed > 0 {
-        progress.limited = true;
-        progress.complete = true;
         progress.stored = store::message_count(conn);
-        if let Some(oldest) = store::oldest_date(conn) {
-            progress.oldest = oldest;
-        }
+        progress.cut_at(store::oldest_date(conn));
         progress.save(conn);
     }
     removed
@@ -504,7 +522,31 @@ pub async fn run(
     // From here on, keep in step with what the app hears: new messages are
     // added, an edited one is replaced, an unsent one is no longer found
     // by what it said.
-    while let Some(message) = live.recv().await {
+    //
+    // A message arriving live says nothing about the ones before it: after
+    // a night asleep the first to arrive is from this minute, with hours
+    // of others still to come. So what arrives is stored, but how far the
+    // store is in step moves only by asking the server for everything
+    // since that point, every so often.
+    let mut check = tokio::time::interval(IN_STEP_EVERY);
+    check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    check.tick().await;
+    loop {
+        let message = tokio::select! {
+            message = live.recv() => match message {
+                Some(message) => message,
+                None => return Ok(()),
+            },
+            _ = check.tick(), if whole => {
+                if store::synced(&conn).is_none() {
+                    // Emptied from outside: begin again from here.
+                    store::start_sync(&conn, now_ms())?;
+                }
+                // Out of reach just now: it is asked again next time.
+                let _ = catch_up(&api, &mut conn, live, &mut progress).await;
+                continue;
+            }
+        };
         if text && !still_wanted(&conn) {
             // Word search was turned off, and its text removed, elsewhere.
             text = false;
@@ -513,12 +555,7 @@ pub async fn run(
             }
         }
         if whole {
-            if store::synced(&conn).is_none() {
-                // Emptied from outside: begin again from here.
-                store::start_sync(&conn, now_ms())?;
-            }
             progress.stored += store::keep(&mut conn, std::slice::from_ref(&message))?;
-            store::set_synced_to(&conn, message.date_created)?;
         } else if message.date_retracted.is_some() {
             store::remove(&conn, &message.guid);
             continue;
@@ -532,7 +569,6 @@ pub async fn run(
             progress.save(&conn);
         }
     }
-    Ok(())
 }
 
 /// Find messages containing every word of `query`, newest first. Words
@@ -557,6 +593,32 @@ pub fn mentions(query: &str) -> Result<Vec<Mention>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trimming_only_ends_a_download_it_cut_into() {
+        // Half-way back: history has been fetched as far as day 500.
+        let fetched = Progress { oldest: 500, newest: 900, ..Progress::default() };
+
+        // What went was older than that (whole messages from a conversation
+        // opened far back), leaving day 200 the oldest: the download has
+        // still only reached day 500, and is not finished.
+        let mut p = fetched.clone();
+        p.cut_at(Some(200));
+        assert_eq!(p, fetched);
+
+        // What went included text it had fetched: it ends where that left it.
+        let mut p = fetched.clone();
+        p.cut_at(Some(700));
+        assert_eq!((p.oldest, p.complete, p.limited), (700, true, true));
+
+        // Nothing fetched yet, or nothing left: nothing to say.
+        let mut p = Progress::default();
+        p.cut_at(Some(700));
+        assert_eq!(p, Progress::default());
+        let mut p = fetched.clone();
+        p.cut_at(None);
+        assert_eq!(p, fetched);
+    }
 
     #[test]
     fn progress_reports_sensible_percentages() {

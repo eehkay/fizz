@@ -257,12 +257,18 @@ impl Convo {
             // same text going out twice, each placeholder waits for its
             // own send to answer (see `confirm`), so that one which fails
             // is still there to say so.
+            // And only to a copy from since it was sent: a page of history
+            // holds older messages of ours that say the same thing (any
+            // two pictures sent without words do), and those are not it.
+            // (Two minutes' grace for the Mac's clock being behind ours.)
             let body = message.body();
             let mut waiting = self
                 .messages
                 .iter()
                 .enumerate()
-                .filter(|(_, m)| m.pending && m.body() == body)
+                .filter(|(_, m)| {
+                    m.pending && m.body() == body && message.date_created >= m.date_created - 120_000
+                })
                 .map(|(i, _)| i);
             if let (Some(only), None) = (waiting.next(), waiting.next()) {
                 self.messages.remove(only);
@@ -1585,7 +1591,9 @@ impl App {
             self.reveal = true;
             return;
         }
-        // Mark it loading first, so opening does not also fetch the latest.
+        // Mark it loading first, so opening does not also fetch the latest;
+        // nor is a copy from last time waiting to be brought up to date.
+        self.stale.remove(chat);
         self.convos.insert(
             chat.to_string(),
             Convo {
@@ -2990,6 +2998,11 @@ impl App {
                 stored,
             } => {
                 let convo = self.convos.entry(chat.clone()).or_default();
+                if page == Page::Latest && convo.detached {
+                    // Asked for before the view jumped into the past: the
+                    // present does not belong in it.
+                    return;
+                }
                 match page {
                     Page::Newer => convo.loading_newer = false,
                     _ => convo.loading = false,
@@ -3017,19 +3030,21 @@ impl App {
                                 // far as this page, there is a gap of
                                 // messages we never saw between them: start
                                 // again from the page rather than show
-                                // history with a hole in it. The database
-                                // knows how far what it holds reaches;
-                                // without it, go by whether the two share
-                                // a message.
-                                let joins = match &stored {
-                                    Some(stored) if stored.vouched => stored.joined,
-                                    _ => {
-                                        convo.messages.is_empty()
-                                            || messages
-                                                .iter()
-                                                .any(|m| convo.messages.iter().any(|c| c.guid == m.guid))
-                                    }
-                                };
+                                // history with a hole in it. Two things must
+                                // hold. What is on screen must share a
+                                // message with the page: it may have come
+                                // from last time's snapshot, which the
+                                // database's word does not cover. And the
+                                // database, where it can say, must hold
+                                // the two as one run: a message that
+                                // arrived live is shared with the page
+                                // however much is missing before it.
+                                let shares = convo.messages.is_empty()
+                                    || messages
+                                        .iter()
+                                        .any(|m| convo.messages.iter().any(|c| c.guid == m.guid));
+                                let joins = shares
+                                    && stored.as_ref().is_none_or(|stored| !stored.vouched || stored.joined);
                                 let whole = messages.len() < MESSAGE_PAGE;
                                 if !joins || whole {
                                     // Only what the page reaches back to
@@ -3340,6 +3355,10 @@ impl App {
                         } else {
                             self.unread.insert(guid.clone());
                         }
+                    } else if message.is_from_me && message.item_type == 0 {
+                        // Answered, here or on another device: whatever
+                        // came before has been seen.
+                        self.unread.remove(&guid);
                     }
                 }
             }
@@ -3937,6 +3956,23 @@ impl App {
             }
             return;
         }
+        // With something drawn over the panes, the mouse is not theirs:
+        // the wheel moves through search results, and a click does nothing
+        // rather than land on what is hidden underneath.
+        if self.filtering {
+            let rows = self.search_rows();
+            match mouse.kind {
+                MouseEventKind::ScrollDown if rows > 0 => {
+                    self.search_index = (self.search_index + 1).min(rows - 1)
+                }
+                MouseEventKind::ScrollUp => self.search_index = self.search_index.saturating_sub(1),
+                _ => {}
+            }
+            return;
+        }
+        if self.deleting.is_some() || self.unsending.is_some() || self.reacting.is_some() {
+            return;
+        }
         let at = Position::new(mouse.column, mouse.row);
         let in_list = self.list_rect.contains(at);
         match mouse.kind {
@@ -4320,6 +4356,107 @@ mod tests {
         assert!(convo.loaded && !convo.loading);
         assert_eq!(shown(&app), ["a", "b"]);
         assert!(convo.retry_after.is_some(), "and it is not asked for again at once");
+    }
+
+    // ----- from the review -------------------------------------------------
+
+    #[test]
+    fn a_message_being_sent_is_not_mistaken_for_an_old_one_like_it() {
+        let mut convo = Convo::default();
+        convo.absorb(sending("temp", "ok"));
+        // A page of history arrives with the same word, said last week.
+        let mut last_week = sent("old", "ok");
+        last_week.date_created -= 7 * 24 * 3600 * 1000;
+        convo.absorb(last_week);
+        convo.settle();
+        let guids: Vec<&str> = convo.messages.iter().map(|m| m.guid.as_str()).collect();
+        assert_eq!(guids, ["old", "temp"], "the one being sent is still there to fail or succeed");
+        // Its own copy from the server, a moment later, does take its place.
+        let mut real = sent("real", "ok");
+        real.date_created += 800;
+        convo.absorb(real);
+        let guids: Vec<&str> = convo.messages.iter().map(|m| m.guid.as_str()).collect();
+        assert_eq!(guids, ["old", "real"]);
+    }
+
+    #[test]
+    fn a_remembered_conversation_is_not_joined_on_the_databases_word_alone() {
+        let mut app = demo();
+        // On screen from last time's snapshot; while Fizz was closed, more
+        // than a page arrived. The database took all of it in, so to the
+        // database the newest page joins. To the screen it does not.
+        showing(&mut app, vec![old("a", 9), old("b", 8)]);
+        let stored = crate::store::Stored {
+            vouched: true,
+            joined: true,
+            ..Default::default()
+        };
+        latest(&mut app, full_page(3), stored);
+        let shown = shown(&app);
+        assert!(!shown.contains(&"a") && !shown.contains(&"b"), "they lie beyond a hole");
+        assert_eq!(shown.len(), MESSAGE_PAGE);
+    }
+
+    #[test]
+    fn the_present_is_not_mixed_into_a_view_of_the_past() {
+        let mut app = demo();
+        showing(&mut app, vec![old("a", 400), old("b", 399)]);
+        app.convos.get_mut("chat").unwrap().detached = true;
+        // The newest page, asked for before the jump, arrives after it.
+        latest(&mut app, full_page(3), crate::store::Stored::default());
+        assert_eq!(shown(&app), ["a", "b"]);
+        assert!(app.convos["chat"].detached);
+    }
+
+    #[test]
+    fn answering_elsewhere_clears_the_unread_mark() {
+        let mut app = demo();
+        let chat = app.chats[1].guid.clone();
+        let now = chrono::Utc::now().timestamp_millis();
+        let arriving = |guid: &str, mine: bool, at: i64| Message {
+            guid: guid.into(),
+            text: Some("hello".into()),
+            is_from_me: mine,
+            date_created: at,
+            chats: vec![crate::model::ChatRef {
+                guid: chat.clone(),
+                ..Default::default()
+            }],
+            ..Message::default()
+        };
+        app.on_incoming(arriving("theirs", false, now));
+        assert!(app.is_unread(&app.chats.iter().find(|c| c.guid == chat).unwrap().clone()));
+        // The reply was typed on the phone.
+        app.on_incoming(arriving("mine", true, now + 1000));
+        assert!(!app.is_unread(&app.chats.iter().find(|c| c.guid == chat).unwrap().clone()));
+    }
+
+    #[test]
+    fn a_click_does_not_reach_what_search_is_drawn_over() {
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut app = demo();
+        app.splash_until = None;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, &mut app)).unwrap();
+        assert!(app.list_rect.height > 6, "the list was drawn");
+        let was_open = app.open.clone();
+        let click = |app: &mut App| {
+            app.on_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: app.list_rect.x + 3,
+                // The third conversation in the list (two rows each).
+                row: app.list_rect.y + 5,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.search_for("the");
+        click(&mut app);
+        assert_eq!(app.open, was_open, "the list is underneath: nothing opens");
+        assert!(app.filtering);
+        // With search closed the same click does open that conversation.
+        app.filtering = false;
+        click(&mut app);
+        assert_ne!(app.open, was_open);
     }
 
 }

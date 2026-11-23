@@ -84,7 +84,15 @@ pub async fn local_copy(
         return Ok(path);
     }
     tokio::fs::create_dir_all(&dir).await?;
-    let part = dir.join("download.part");
+    // Its own name while it arrives: the same file can be wanted twice at
+    // once (a video's still being made as you open the video), and two
+    // downloads writing one file leave neither with a whole one.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let part = dir.join(format!(
+        "download-{}-{}.part",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let name = safe_name(attachment.name());
 
     let expected = attachment.total_bytes;
@@ -108,7 +116,11 @@ pub async fn local_copy(
             )));
         }
     })
-    .await?;
+    .await
+    .inspect_err(|_| {
+        // Nothing will come back for a part of a file.
+        let _ = std::fs::remove_file(&part);
+    })?;
 
     let mut head = [0u8; 8];
     let read = {

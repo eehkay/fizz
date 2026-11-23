@@ -89,12 +89,19 @@ pub fn load() -> Result<Option<Config>> {
     }
 }
 
+/// The file `save` writes. The password goes in quotes: reading the file
+/// back takes one pair off and nothing else, so a password that begins or
+/// ends with a space, or is itself in quotes, comes back as it was typed.
+fn env_file(config: &Config) -> String {
+    format!("BB_URL={}\nBB_PASSWORD=\"{}\"\n", config.url, config.password)
+}
+
 pub fn save(config: &Config) -> Result<()> {
     let path = config_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).context("creating the config directory")?;
     }
-    let body = format!("BB_URL={}\nBB_PASSWORD={}\n", config.url, config.password);
+    let body = env_file(config);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -576,6 +583,21 @@ mod tests {
     fn template_matches_defaults() {
         let parsed = Settings::parse(SETTINGS_TEMPLATE).unwrap();
         assert_eq!(format!("{parsed:?}"), format!("{:?}", Settings::default()));
+    }
+
+    #[test]
+    fn a_password_reads_back_as_it_was_typed() {
+        for password in ["plain", "trailing space ", " leading", "\"quoted\"", "'single'", "a=b#c", "ends with \""] {
+            let config = Config {
+                url: "http://my-mac:1234".into(),
+                password: password.into(),
+            };
+            let (url, read) = parse(&env_file(&config));
+            assert_eq!(url.as_deref(), Some("http://my-mac:1234"));
+            assert_eq!(read.as_deref(), Some(password));
+        }
+        // A file written by hand, or by an earlier version, without quotes.
+        assert_eq!(parse("BB_PASSWORD=plain\n").1.as_deref(), Some("plain"));
     }
 
     #[test]
