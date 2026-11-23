@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::model::Message;
 
 /// Bumped whenever the tables change; `migrate` brings older files up.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 pub fn folder() -> PathBuf {
     dirs::data_local_dir()
@@ -142,6 +142,23 @@ fn migrate(conn: &Connection) -> Result<()> {
         )
         .context("couldn't upgrade Fizz's database")?;
     }
+    if version < 3 {
+        conn.execute_batch(
+            r#"
+            BEGIN;
+            -- Which folder of the chat list a conversation has been put
+            -- in. A folder is nothing but its name here: it exists for as
+            -- long as something is in it.
+            CREATE TABLE filed (
+                chat   TEXT PRIMARY KEY,
+                folder TEXT NOT NULL
+            );
+            PRAGMA user_version = 3;
+            COMMIT;
+            "#,
+        )
+        .context("couldn't upgrade Fizz's database")?;
+    }
     Ok(())
 }
 
@@ -186,6 +203,32 @@ pub fn set_seen(conn: &Connection, chat: &str, at: i64) -> Result<()> {
 
 pub fn forget_seen(conn: &Connection, chat: &str) {
     let _ = conn.execute("DELETE FROM seen WHERE chat = ?1", [chat]);
+}
+
+// ----- folders ---------------------------------------------------------
+
+/// Every conversation that is in a folder, and which.
+pub fn filed(conn: &Connection) -> HashMap<String, String> {
+    let Ok(mut statement) = conn.prepare("SELECT chat, folder FROM filed") else {
+        return HashMap::new();
+    };
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+}
+
+/// Put a conversation in a folder, or with `None` take it out of one.
+pub fn file(conn: &Connection, chat: &str, folder: Option<&str>) -> Result<()> {
+    match folder {
+        Some(folder) => conn.execute(
+            "INSERT INTO filed(chat, folder) VALUES (?1, ?2)
+             ON CONFLICT(chat) DO UPDATE SET folder = excluded.folder",
+            params![chat, folder],
+        )?,
+        None => conn.execute("DELETE FROM filed WHERE chat = ?1", [chat])?,
+    };
+    Ok(())
 }
 
 // ----- messages --------------------------------------------------------
@@ -1367,6 +1410,19 @@ mod tests {
         assert!(mine[0].from_me && mine[0].chat == "chatB" && mine[0].text == "a\ttab");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+    #[test]
+    fn conversations_are_filed_and_taken_out() {
+        let conn = memory();
+        file(&conn, "chat1", Some("Stats")).unwrap();
+        file(&conn, "chat2", Some("Stats")).unwrap();
+        file(&conn, "chat1", Some("Codes")).unwrap();
+        let held = filed(&conn);
+        assert_eq!(held.len(), 2);
+        assert_eq!((held["chat1"].as_str(), held["chat2"].as_str()), ("Codes", "Stats"));
+        file(&conn, "chat1", None).unwrap();
+        assert_eq!(filed(&conn).len(), 1);
+    }
+
     // ----- whole messages ------------------------------------------------
 
     use crate::model::{Attachment, ChatRef, Handle};

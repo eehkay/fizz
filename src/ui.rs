@@ -224,6 +224,81 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         frame.render_widget(block, popup);
         frame.render_widget(Paragraph::new(lines), inner);
     }
+    if app.filing.is_some() {
+        draw_filing(frame, app, main);
+    }
+}
+
+/// The folder chooser: a box to type in, and the folders it could mean.
+fn draw_filing(frame: &mut Frame, app: &mut App, main: Rect) {
+    use crate::app::FilingChoice;
+    let Some(filing) = &app.filing else { return };
+    let theme = app.theme.clone();
+    let name = app
+        .chats
+        .iter()
+        .find(|c| c.guid == filing.chat)
+        .map_or("this conversation".to_string(), |c| app.chat_title(c));
+    let choices = app.filing_choices();
+    let chosen = filing.index.min(choices.len().saturating_sub(1));
+    let w = main.width.saturating_sub(4).min(56);
+    let inner_w = usize::from(w.saturating_sub(6));
+
+    let mut lines = vec![match filing.typed.is_empty() {
+        true => Line::from(vec![
+            Span::styled("› ▏", Style::new().fg(theme.accent)),
+            Span::styled("type to find a folder, or to name a new one", Style::new().fg(theme.muted)),
+        ]),
+        false => Line::from(vec![
+            Span::styled("› ", Style::new().fg(theme.accent)),
+            Span::styled(filing.typed.clone(), Style::new().fg(theme.bright).add_modifier(Modifier::BOLD)),
+            Span::styled("▏", Style::new().fg(theme.accent)),
+        ]),
+    }];
+    lines.push(Line::default());
+    if choices.is_empty() {
+        lines.push(Line::styled(
+            "No folders yet. Type a name for the first one.",
+            Style::new().fg(theme.muted),
+        ));
+    }
+    for (i, choice) in choices.iter().enumerate() {
+        let on = i == chosen;
+        let (text, note) = match choice {
+            FilingChoice::Folder(name, count) => (format!("▸ {name}"), count.to_string()),
+            FilingChoice::New(name) => (format!("+ New folder “{name}”"), String::new()),
+            FilingChoice::Out(name) => (format!("‹ Take out of “{name}”"), String::new()),
+        };
+        let text = truncate(&text, inner_w.saturating_sub(width(&note) + 3));
+        let gap = inner_w.saturating_sub(2 + width(&text) + width(&note));
+        let style = match on {
+            true => Style::new().fg(theme.bright).bg(theme.surface).add_modifier(Modifier::BOLD),
+            false => Style::new().fg(theme.text),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if on { "▌ " } else { "  " }, Style::new().fg(theme.accent)),
+            Span::styled(format!("{text}{}", pad(gap)), style),
+            Span::styled(note, style.fg(theme.muted)),
+        ]));
+    }
+    let h = (lines.len() as u16 + 4).min(main.height);
+    let popup = Rect::new(
+        main.x + main.width.saturating_sub(w) / 2,
+        main.y + main.height.saturating_sub(h) / 2,
+        w.min(main.width),
+        h,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .title(Span::styled(
+            format!(" {} ", truncate(&format!("Folder for {name}"), usize::from(w.saturating_sub(6)))),
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup).inner(ratatui::layout::Margin::new(2, 1));
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // ----- search layer ----------------------------------------------------
@@ -938,6 +1013,8 @@ const HELP: &[(&str, &[(&str, &str)])] = &[
             ("↑ ↓  or  j k", "Move between conversations"),
             ("Enter", "Open the conversation and start typing"),
             ("n", "New conversation: type a name, number or email"),
+            ("f", "Folder: put the conversation in a folder (type a name for a new one), or take it out"),
+            ("←  Backspace", "Out of a folder, back to all conversations"),
             ("D", "Delete the conversation everywhere (capital D; asks first)"),
             ("/", "Search: conversations and contacts by name or number, and messages by their words; Tab jumps between the sections"),
             ("G", "New group: type a name, Enter adds them; then Enter on \"Start the group\""),
@@ -1120,6 +1197,8 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             .collect();
         let label = if app.pick_group { "New group" } else { "To" };
         format!("{label}: {added}{query}▏")
+    } else if let Some(folder) = &app.in_folder {
+        format!("Messages › {folder}")
     } else {
         "Messages".to_string()
     };
@@ -1164,7 +1243,11 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         let index = app.list_top + slot;
         let y = inner.y + (slot as u16) * 2;
         let is_cursor = index == cursor;
-        let is_open = app.open.as_deref() == Some(chat.guid.as_str());
+        // A folder is lit while the open conversation is inside it.
+        let is_open = match (app.open.as_deref(), chat.guid.strip_prefix(crate::app::FOLDER)) {
+            (Some(open), Some(folder)) => app.folder_of(open) == Some(folder),
+            (open, _) => open == Some(chat.guid.as_str()),
+        };
         let lines = chat_row(app, chat, w, is_cursor && focused, is_open);
         for (i, line) in lines.into_iter().enumerate() {
             let row = Rect::new(inner.x, y + i as u16, inner.width, 1);
@@ -1258,7 +1341,14 @@ fn chat_row(app: &App, chat: &Chat, w: usize, cursor: bool, open: bool) -> [Line
         .map(|m| list_stamp(m.date_created))
         .unwrap_or_default();
     let room = w.saturating_sub(3 + width(&stamp) + 2);
-    let title = truncate(&app.chat_title(chat), room);
+    let folder = chat.guid.strip_prefix(crate::app::FOLDER);
+    let back = chat.guid == crate::app::BACK;
+    let name = match folder {
+        Some(name) => format!("▸ {name}"),
+        None if back => "‹ All conversations".to_string(),
+        None => app.chat_title(chat),
+    };
+    let title = truncate(&name, room);
     let gap = w.saturating_sub(3 + width(&title) + width(&stamp) + 1);
     let title_style = if unread || open {
         base.fg(theme.bright).add_modifier(Modifier::BOLD)
@@ -1276,6 +1366,18 @@ fn chat_row(app: &App, chat: &Chat, w: usize, cursor: bool, open: bool) -> [Line
 
     let typing = app.is_typing(&chat.guid);
     let text = match &chat.last_message {
+        _ if back => String::new(),
+        // A folder says what is in it, not what was last said in it.
+        _ if folder.is_some() => {
+            let folder = folder.unwrap_or_default();
+            let all = app.folder_members(folder).count();
+            let unread = app.folder_members(folder).filter(|c| app.is_unread(c)).count();
+            let what = if all == 1 { "conversation" } else { "conversations" };
+            match unread {
+                0 => format!("{all} {what}"),
+                n => format!("{all} {what} · {n} unread"),
+            }
+        }
         _ if typing => "typing…".to_string(),
         Some(message) => preview(message),
         None if chat.is_draft() && chat.touched == 0 => {
@@ -2150,6 +2252,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         &[("type", "search"), ("↑↓", "move"), ("tab", "next section"), ("⏎", "open"), ("^U", "clear"), ("esc", "close")]
     } else if app.deleting.is_some() {
         &[("D", "delete for good"), ("any other key", "cancel")]
+    } else if app.filing.is_some() {
+        &[("type", "a folder's name"), ("↑↓", "choose"), ("⏎", "move it there"), ("esc", "cancel")]
     } else if app.unsending.is_some() {
         &[("⏎", "unsend"), ("esc", "cancel")]
     } else if app.replying.is_some() && app.focus == Focus::Compose {
@@ -2162,8 +2266,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         &[("type", "a name"), ("↑↓", "choose"), ("⏎", "add, or start the group"), ("⌫", "remove last"), ("esc", "cancel")]
     } else if app.picking.is_some() {
         &[("type", "name or number"), ("↑↓", "choose"), ("tab", "add another"), ("⏎", "start"), ("esc", "cancel")]
+    } else if app.focus == Focus::List && app.in_folder.is_some() {
+        &[("↑↓", "move"), ("⏎", "open"), ("←", "all conversations"), ("f", "move to a folder"), ("/", "search"), ("?", "help")]
     } else if app.focus == Focus::List {
-        &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("G", "new group"), ("/", "search"), ("?", "help"), ("q", "quit")]
+        &[("↑↓", "move"), ("⏎", "open"), ("n", "new"), ("G", "new group"), ("f", "folder"), ("/", "search"), ("?", "help"), ("q", "quit")]
     } else if app.focus == Focus::Browse && app.selected_failed() {
         &[("⏎", "try again"), ("x", "discard"), ("esc", "back")]
     } else if app.focus == Focus::Browse && app.selected_text().is_some() {

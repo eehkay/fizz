@@ -526,8 +526,9 @@ async fn event_loop(
 }
 
 /// Render the demo once to plain text: `fizz --snapshot 120x36`. Add
-/// `--splash` to render the loading screen instead, or `--search <words>`
-/// for the search layer with those words typed.
+/// `--splash` to render the loading screen instead, `--search <words>`
+/// for the search layer with those words typed, or `--keys "<keys>"` to
+/// press keys first.
 fn snapshot(size: Option<&str>) -> Result<()> {
     let (w, h) = size
         .and_then(|s| s.split_once('x'))
@@ -545,6 +546,32 @@ fn snapshot(size: Option<&str>) -> Result<()> {
         app.search_for(&args[i + 1..].join(" "));
     }
     let mut terminal = Terminal::new(TestBackend::new(w, h))?;
+    // `--keys "j f S t a t s Enter"`: press these first, one after another.
+    // Each is a single character or the name of a key. Nothing typed into
+    // the demo goes anywhere, so this is a safe way to try the interface.
+    if let Some(keys) = args.iter().position(|a| a == "--keys").and_then(|i| args.get(i + 1)) {
+        use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        app.splash_until = None;
+        for name in keys.split_whitespace() {
+            let code = match name {
+                "Enter" => KeyCode::Enter,
+                "Esc" => KeyCode::Esc,
+                "Tab" => KeyCode::Tab,
+                "Up" => KeyCode::Up,
+                "Down" => KeyCode::Down,
+                "Left" => KeyCode::Left,
+                "Right" => KeyCode::Right,
+                "Backspace" => KeyCode::Backspace,
+                "Space" => KeyCode::Char(' '),
+                one if one.chars().count() == 1 => KeyCode::Char(one.chars().next().unwrap_or(' ')),
+                other => anyhow::bail!("--keys: \"{other}\" is not a key"),
+            };
+            // Drawn before each key, as it would be: some keys act on
+            // what the last frame put where.
+            terminal.draw(|frame| ui::draw(frame, &mut app))?;
+            app.on_terminal(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        }
+    }
     terminal.draw(|frame| ui::draw(frame, &mut app))?;
     let buffer = terminal.backend().buffer();
     for y in 0..h {

@@ -329,6 +329,7 @@ The essentials:
 |              | `G`                         | New group conversation (capital G) |
 |              | `D`                         | Delete the conversation everywhere (capital D; asks first) |
 |              | `/`                         | Search conversations, contacts and message text |
+|              | `f`                         | Put the conversation in a folder, or take it out |
 |              | `q`                         | Quit                         |
 | Writing      | `Enter`                     | Send                         |
 |              | `Shift+Enter` or `Ctrl+J`   | New line                     |
@@ -375,6 +376,24 @@ and three kinds of result:
 
 Up and Down move, Tab jumps to the next section, Enter opens, Esc closes.
 Pressing `/` again brings back your last search; `Ctrl+U` clears it.
+
+## Folders
+
+Conversations you would rather not see one by one (a handful of numbers
+that all send the same daily report, sign-in codes, a project) can be put
+in a folder. A folder is one row in the chat list, showing how many
+conversations are in it and how many are unread.
+
+- **Put a conversation in one:** `f` on it in the chat list. Type to find
+  a folder or to name a new one, and press Enter.
+- **Look inside:** Enter on the folder. The list shows its conversations;
+  the first row, Left or Backspace goes back out.
+- **Take one out, or move it:** `f` on it again.
+
+A folder exists for as long as something is in it. Search still finds
+everything, and opening a conversation from search shows it in its folder.
+Folders are Fizz's own: Messages on your phone and Mac still lists those
+conversations separately.
 
 ### Searching message text
 

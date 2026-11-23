@@ -180,6 +180,35 @@ pub enum Focus {
     Browse,
 }
 
+/// The id of the chat-list row that stands for a folder: this, then its
+/// name. Such a row is never a conversation and never leaves the list.
+pub const FOLDER: &str = "folder:";
+/// The id of the row, at the top of an open folder, that leads back out.
+pub const BACK: &str = "back:";
+/// The longest a folder's name may be.
+const FOLDER_NAME: usize = 28;
+
+/// Choosing a folder for a conversation.
+pub struct Filing {
+    /// The conversation being moved.
+    pub chat: String,
+    /// What has been typed: it narrows the folders offered, and is the
+    /// name of a new one.
+    pub typed: String,
+    pub index: usize,
+}
+
+/// One thing the folder chooser offers.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilingChoice {
+    /// A folder that exists, and how many conversations are in it.
+    Folder(String, usize),
+    /// A new folder by this name.
+    New(String),
+    /// Out of the folder it is in, back to the main list.
+    Out(String),
+}
+
 /// One conversation's loaded history.
 #[derive(Default)]
 pub struct Convo {
@@ -398,6 +427,16 @@ pub struct App {
     pub replying: Option<(String, usize, String)>,
     /// The conversation waiting for "really delete?" to be answered.
     pub deleting: Option<String>,
+    /// Conversations put in a folder of the chat list: id to folder name.
+    filed: HashMap<String, String>,
+    /// The rows that stand for folders in the main list, newest first, and
+    /// the one that leads back out of an open folder.
+    folder_rows: Vec<Chat>,
+    back_row: Chat,
+    /// The folder whose conversations the list is showing, if any.
+    pub in_folder: Option<String>,
+    /// The folder chooser, while it is up.
+    pub filing: Option<Filing>,
     /// Chats where the other side is typing, and since when.
     typing_theirs: HashMap<String, Instant>,
     /// The chat we have told "typing…" to, if any.
@@ -549,6 +588,14 @@ impl App {
             cursor: None,
             open: None,
             list_top: 0,
+            filed: HashMap::new(),
+            folder_rows: Vec::new(),
+            back_row: Chat {
+                guid: BACK.to_string(),
+                ..Chat::default()
+            },
+            in_folder: None,
+            filing: None,
             filter: String::new(),
             filtering: false,
             convos: HashMap::new(),
@@ -734,7 +781,9 @@ impl App {
                 }
             }
             self.seen = crate::store::seen(conn);
+            self.filed = crate::store::filed(conn);
         }
+        self.rebuild_folders();
     }
 
     /// Take in read markers another running Fizz has written since ours
@@ -838,6 +887,13 @@ impl App {
     }
 
     pub fn is_unread(&self, chat: &Chat) -> bool {
+        if chat.guid == BACK {
+            return false;
+        }
+        if let Some(folder) = chat.guid.strip_prefix(FOLDER) {
+            // A folder is unread while anything in it is.
+            return self.folder_members(folder).any(|c| self.is_unread(c));
+        }
         if self.unread.contains(&chat.guid) {
             return true;
         }
@@ -893,7 +949,195 @@ impl App {
 
     /// Chats matching the search box, in display order.
     pub fn visible(&self) -> Vec<&Chat> {
-        self.chats.iter().collect()
+        if let Some(folder) = &self.in_folder {
+            // Inside a folder: the way back out, then what is in it.
+            return std::iter::once(&self.back_row)
+                .chain(self.folder_members(folder))
+                .collect();
+        }
+        // The main list: conversations in no folder, and one row for each
+        // folder, all in order of when anything last happened in them.
+        let mut rows: Vec<&Chat> = self
+            .chats
+            .iter()
+            .filter(|c| !self.filed.contains_key(&c.guid))
+            .chain(&self.folder_rows)
+            .collect();
+        rows.sort_by_key(|c| std::cmp::Reverse(c.last_activity()));
+        rows
+    }
+
+    // ----- folders -----------------------------------------------------
+
+    /// The loaded conversations in a folder, newest first.
+    pub fn folder_members<'a>(&'a self, folder: &'a str) -> impl Iterator<Item = &'a Chat> {
+        self.chats
+            .iter()
+            .filter(move |c| self.filed.get(&c.guid).is_some_and(|f| f == folder))
+    }
+
+    /// The folder a conversation is in.
+    pub fn folder_of(&self, guid: &str) -> Option<&str> {
+        self.filed.get(guid).map(String::as_str)
+    }
+
+    /// Work out the rows that stand for folders again, after conversations
+    /// or what is filed where have changed. A folder with nothing loaded
+    /// in it has no row.
+    fn rebuild_folders(&mut self) {
+        let mut names: Vec<&String> = self.filed.values().collect();
+        names.sort();
+        names.dedup();
+        let rows: Vec<Chat> = names
+            .into_iter()
+            .filter_map(|name| {
+                // Chats are kept newest first, so the first is the newest.
+                let newest = self.folder_members(name).next()?;
+                Some(Chat {
+                    guid: format!("{FOLDER}{name}"),
+                    display_name: Some(name.clone()),
+                    last_message: newest.last_message.clone(),
+                    touched: newest.touched,
+                    ..Chat::default()
+                })
+            })
+            .collect();
+        self.folder_rows = rows;
+        if self
+            .in_folder
+            .as_ref()
+            .is_some_and(|open| !self.folder_rows.iter().any(|row| row.guid[FOLDER.len()..] == **open))
+        {
+            // The folder being looked at has emptied.
+            self.in_folder = None;
+            self.cursor = self.visible().first().map(|c| c.guid.clone());
+        }
+    }
+
+    /// Step into a folder, onto its newest conversation.
+    fn enter_folder(&mut self, folder: &str) {
+        self.in_folder = Some(folder.to_string());
+        self.list_top = 0;
+        let rows = self.visible();
+        self.cursor = rows.get(1).or(rows.first()).map(|c| c.guid.clone());
+    }
+
+    /// Step back out to the main list, onto the folder's own row.
+    fn leave_folder(&mut self) {
+        if let Some(folder) = self.in_folder.take() {
+            self.cursor = Some(format!("{FOLDER}{folder}"));
+        }
+    }
+
+    /// `f` in the chat list: choose a folder for the conversation there.
+    fn start_filing(&mut self) {
+        let Some(guid) = self.cursor.clone() else { return };
+        if guid.starts_with(FOLDER) || guid == BACK {
+            return self.set_status("Open the folder, then press f on a conversation to move it".into());
+        }
+        if guid.starts_with("new:") {
+            return self.set_status("A conversation can go in a folder once it has a message in it".into());
+        }
+        self.filing = Some(Filing {
+            chat: guid,
+            typed: String::new(),
+            index: 0,
+        });
+    }
+
+    /// What the folder chooser offers for what has been typed: the folders
+    /// whose names contain it, a new one by that name, and the way out of
+    /// the folder the conversation is in.
+    pub fn filing_choices(&self) -> Vec<FilingChoice> {
+        let Some(filing) = &self.filing else {
+            return Vec::new();
+        };
+        let typed = filing.typed.trim();
+        let current = self.folder_of(&filing.chat);
+        let mut counts: Vec<(&String, usize)> = Vec::new();
+        for folder in self.filed.values() {
+            match counts.iter_mut().find(|(name, _)| *name == folder) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((folder, 1)),
+            }
+        }
+        counts.sort_by_key(|(name, _)| name.to_lowercase());
+        let mut choices: Vec<FilingChoice> = counts
+            .iter()
+            .filter(|(name, _)| Some(name.as_str()) != current)
+            .filter(|(name, _)| name.to_lowercase().contains(&typed.to_lowercase()))
+            .map(|(name, count)| FilingChoice::Folder((*name).clone(), *count))
+            .collect();
+        let exists = counts.iter().any(|(name, _)| name.eq_ignore_ascii_case(typed));
+        if !typed.is_empty() && !exists {
+            choices.push(FilingChoice::New(typed.to_string()));
+        }
+        if let Some(current) = current {
+            choices.push(FilingChoice::Out(current.to_string()));
+        }
+        choices
+    }
+
+    fn on_filing_key(&mut self, key: KeyEvent) {
+        let choices = self.filing_choices();
+        let Some(filing) = &mut self.filing else { return };
+        match key.code {
+            KeyCode::Esc => self.filing = None,
+            KeyCode::Down | KeyCode::Tab if !choices.is_empty() => {
+                filing.index = (filing.index + 1).min(choices.len() - 1)
+            }
+            KeyCode::Up => filing.index = filing.index.saturating_sub(1),
+            KeyCode::Backspace => {
+                filing.typed.pop();
+                filing.index = 0;
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && filing.typed.chars().count() < FOLDER_NAME =>
+            {
+                filing.typed.push(c);
+                filing.index = 0;
+            }
+            KeyCode::Enter => {
+                let chat = filing.chat.clone();
+                if let Some(choice) = choices.get(filing.index.min(choices.len().saturating_sub(1))) {
+                    self.filing = None;
+                    self.file(&chat, choice.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Carry out a choice from the folder chooser.
+    fn file(&mut self, chat: &str, choice: FilingChoice) {
+        // Where the cursor is, to leave it on whatever takes this row's place.
+        let position = self.visible().iter().position(|c| c.guid == chat);
+        let folder = match &choice {
+            FilingChoice::Folder(name, _) | FilingChoice::New(name) => Some(name.clone()),
+            FilingChoice::Out(_) => None,
+        };
+        match &folder {
+            Some(name) => self.filed.insert(chat.to_string(), name.clone()),
+            None => self.filed.remove(chat),
+        };
+        if let Some(conn) = &self.store
+            && let Err(e) = crate::store::file(conn, chat, folder.as_deref())
+        {
+            crate::config::log(&format!("couldn't save a folder: {e:#}"));
+        }
+        self.rebuild_folders();
+        let rows = self.visible();
+        if !rows.iter().any(|c| c.guid == chat) {
+            self.cursor = position
+                .and_then(|p| rows.get(p).or(rows.last()))
+                .map(|c| c.guid.clone());
+        }
+        self.set_status(match choice {
+            FilingChoice::Folder(name, _) => format!("Moved to “{name}”"),
+            FilingChoice::New(name) => format!("Moved to a new folder, “{name}”"),
+            FilingChoice::Out(name) => format!("Taken out of “{name}”"),
+        });
     }
 
     // ----- the search layer ------------------------------------------------
@@ -1270,6 +1514,7 @@ impl App {
     fn sort_chats(&mut self) {
         self.chats
             .sort_by_key(|c| std::cmp::Reverse(c.last_activity()));
+        self.rebuild_folders();
     }
 
     /// Build (or extend) the chat list from the newest messages. The first
@@ -1320,6 +1565,13 @@ impl App {
     }
 
     pub fn open_chat(&mut self, guid: &str) {
+        // Wherever it was opened from (search, a notification's key), the
+        // list shows where it lives: its folder, or the main list.
+        let home = self.folder_of(guid).map(str::to_string);
+        if self.in_folder != home && !self.headless {
+            self.in_folder = home;
+            self.list_top = 0;
+        }
         if self.open.as_deref() != Some(guid) {
             self.drop_unfinished();
             if let Some(previous) = self.open.take() {
@@ -2012,6 +2264,9 @@ impl App {
 
     fn start_deleting(&mut self) {
         let Some(guid) = self.cursor.clone() else { return };
+        if guid.starts_with(FOLDER) || guid == BACK {
+            return self.set_status("That is a folder: open it to delete a conversation in it".into());
+        }
         if guid.starts_with("new:") {
             // Never sent, so there is nothing on the server to delete.
             return self.forget_chat(&guid);
@@ -2042,6 +2297,12 @@ impl App {
         self.convos.remove(guid);
         self.drafts.remove(guid);
         self.unread.remove(guid);
+        if self.filed.remove(guid).is_some() {
+            if let Some(conn) = &self.store {
+                let _ = crate::store::file(conn, guid, None);
+            }
+            self.rebuild_folders();
+        }
         if self.open.as_deref() == Some(guid) {
             self.drop_unfinished();
             self.open = None;
@@ -3567,6 +3828,13 @@ impl App {
 
     fn open_cursor(&mut self) {
         let Some(guid) = self.cursor.clone() else { return };
+        // A folder's row opens the folder; the row at its top closes it.
+        if guid == BACK {
+            return self.leave_folder();
+        }
+        if let Some(folder) = guid.strip_prefix(FOLDER) {
+            return self.enter_folder(folder);
+        }
         self.open_chat(&guid);
         self.focus = Focus::Compose;
     }
@@ -3578,7 +3846,10 @@ impl App {
             return;
         }
         // Help: F1 anywhere, `?` wherever it would not be typed as text.
-        let typing = self.focus == Focus::Compose || self.filtering || self.picking.is_some();
+        let typing = self.focus == Focus::Compose
+            || self.filtering
+            || self.picking.is_some()
+            || self.filing.is_some();
         if key.code == KeyCode::F(1) || (key.code == KeyCode::Char('?') && !typing && !self.help) {
             self.help = !self.help;
             self.help_scroll = 0;
@@ -3618,6 +3889,9 @@ impl App {
                 _ => self.deleting = None,
             }
             return;
+        }
+        if self.filing.is_some() {
+            return self.on_filing_key(key);
         }
         if self.unsending.is_some() {
             match key.code {
@@ -3688,6 +3962,10 @@ impl App {
                 }
                 // Capital D, so it is never hit by accident.
                 KeyCode::Char('D') => self.start_deleting(),
+                KeyCode::Char('f') => self.start_filing(),
+                KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace if self.in_folder.is_some() => {
+                    self.leave_folder()
+                }
                 KeyCode::Char('r') => {
                     self.set_status("Refreshing…".into());
                     self.fetch_chats(false);
@@ -3970,7 +4248,11 @@ impl App {
             }
             return;
         }
-        if self.deleting.is_some() || self.unsending.is_some() || self.reacting.is_some() {
+        if self.deleting.is_some()
+            || self.unsending.is_some()
+            || self.reacting.is_some()
+            || self.filing.is_some()
+        {
             return;
         }
         let at = Position::new(mouse.column, mouse.row);
@@ -4457,6 +4739,120 @@ mod tests {
         app.filtering = false;
         click(&mut app);
         assert_ne!(app.open, was_open);
+    }
+
+    // ----- folders ---------------------------------------------------------
+
+    fn list(app: &App) -> Vec<String> {
+        app.visible()
+            .iter()
+            .map(|c| match c.guid.strip_prefix(FOLDER) {
+                Some(folder) => format!("[{folder}]"),
+                None if c.guid == BACK => "<back>".to_string(),
+                None => app.chat_title(c),
+            })
+            .collect()
+    }
+
+    fn keys(app: &mut App, typed: &str) {
+        for name in typed.split_whitespace() {
+            let code = match name {
+                "Enter" => KeyCode::Enter,
+                "Esc" => KeyCode::Esc,
+                "Down" => KeyCode::Down,
+                "Left" => KeyCode::Left,
+                one => KeyCode::Char(one.chars().next().unwrap()),
+            };
+            app.on_key(KeyEvent::new(code, KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn conversations_go_into_a_folder_and_come_out() {
+        let mut app = demo();
+        assert_eq!(list(&app), ["Maya Okafor", "Weekend Crew", "Sam Whitlock", "32665", "Dana Kessler"]);
+
+        // The fourth, into a new folder; then the fifth, into the same one.
+        keys(&mut app, "j j j f C o d e s Enter");
+        assert_eq!(list(&app), ["Maya Okafor", "Weekend Crew", "Sam Whitlock", "[Codes]", "Dana Kessler"]);
+        assert_eq!(app.cursor.as_deref(), Some("folder:Codes"), "the folder took its place");
+        keys(&mut app, "j f Enter");
+        assert_eq!(list(&app), ["Maya Okafor", "Weekend Crew", "Sam Whitlock", "[Codes]"]);
+
+        // Enter on the folder shows what is in it; Left goes back out.
+        keys(&mut app, "Enter");
+        assert_eq!(app.in_folder.as_deref(), Some("Codes"));
+        assert_eq!(list(&app), ["<back>", "32665", "Dana Kessler"]);
+        assert!(app.open.as_deref() != Some("folder:Codes"), "a folder is not a conversation");
+        keys(&mut app, "Left");
+        assert_eq!((app.in_folder.as_deref(), app.cursor.as_deref()), (None, Some("folder:Codes")));
+
+        // Inside again: the first row leads out, and D there deletes nothing.
+        keys(&mut app, "Enter k");
+        assert_eq!(app.cursor.as_deref(), Some(BACK));
+        keys(&mut app, "D");
+        assert!(app.deleting.is_none());
+        keys(&mut app, "Enter");
+        assert_eq!(app.in_folder, None);
+
+        // Taking both out again leaves no folder behind.
+        keys(&mut app, "Enter f Enter");
+        assert_eq!(list(&app), ["<back>", "Dana Kessler"]);
+        keys(&mut app, "f Enter");
+        assert_eq!(app.in_folder, None, "the emptied folder is left");
+        assert_eq!(list(&app), ["Maya Okafor", "Weekend Crew", "Sam Whitlock", "32665", "Dana Kessler"]);
+    }
+
+    #[test]
+    fn a_folder_is_unread_while_anything_in_it_is() {
+        let mut app = demo();
+        // Sam, the third, is the demo's unread conversation.
+        keys(&mut app, "j j f W o r k Enter");
+        let folder = app.visible().into_iter().find(|c| c.guid == "folder:Work").unwrap().clone();
+        assert!(app.is_unread(&folder));
+        // Reading it inside the folder clears the folder's mark too.
+        keys(&mut app, "Enter Enter");
+        assert_eq!(app.open.as_deref(), Some(app.chats[2].guid.as_str()));
+        assert!(!app.is_unread(&folder));
+    }
+
+    #[test]
+    fn the_chooser_offers_what_fits_what_was_typed() {
+        let mut app = demo();
+        keys(&mut app, "f T r a i l Enter");
+        keys(&mut app, "j j j f C o d e s Enter");
+        // On a conversation in no folder: both folders, by name.
+        keys(&mut app, "k f");
+        let choices = app.filing_choices();
+        assert_eq!(
+            choices,
+            [FilingChoice::Folder("Codes".into(), 1), FilingChoice::Folder("Trail".into(), 1)]
+        );
+        // Typing narrows them, and offers a new one unless the name is taken.
+        keys(&mut app, "t r");
+        assert_eq!(
+            app.filing_choices(),
+            [FilingChoice::Folder("Trail".into(), 1), FilingChoice::New("tr".into())]
+        );
+        keys(&mut app, "a i l");
+        assert_eq!(app.filing_choices(), [FilingChoice::Folder("Trail".into(), 1)]);
+        keys(&mut app, "Esc");
+        assert!(app.filing.is_none());
+        assert_eq!(app.filed.len(), 2, "nothing moved");
+    }
+
+    #[test]
+    fn opening_a_conversation_shows_the_folder_it_lives_in() {
+        let mut app = demo();
+        let dana = app.chats[4].guid.clone();
+        keys(&mut app, "j j j j f O l d Enter");
+        assert_eq!(app.in_folder, None);
+        // Opened some other way than through the list: from search, say.
+        app.open_chat(&dana);
+        assert_eq!(app.in_folder.as_deref(), Some("Old"));
+        let maya = app.chats[0].guid.clone();
+        app.open_chat(&maya);
+        assert_eq!(app.in_folder, None);
     }
 
 }
